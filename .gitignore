@@ -27,5 +27,4 @@ Carthage/Build/
 # Injection tool build outputs
 *.o
 TroisInjector/com.trois.app.Injector
-TroisLoader/trois-inject
-TroisLoader/TroisLoader.bundle/Contents/MacOS/
+TroisLoader/TroisLoader.bundle/

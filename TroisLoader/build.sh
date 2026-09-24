@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build TroisLoader.bundle and trois-inject tool
+# Build TroisLoader.bundle
 
 set -e
 
@@ -10,8 +10,10 @@ echo "Building TroisLoader.bundle..."
 rm -rf "$OUTPUT"
 mkdir -p "$OUTPUT/Contents/MacOS"
 
-# Compile the loader bundle
+# arm64 only, like the injector.
 clang -fobjc-arc -fmodules \
+    -arch arm64 \
+    -mmacosx-version-min=11.0 \
     -framework AppKit \
     -framework Foundation \
     -bundle \
@@ -20,17 +22,3 @@ clang -fobjc-arc -fmodules \
 
 cp "$DIR/Info.plist" "$OUTPUT/Contents/"
 echo "Built: $OUTPUT"
-
-echo "Building trois-inject tool..."
-# Compile the injector tool
-clang -o "$DIR/trois-inject" \
-    -I"$DIR" \
-    "$DIR/MachInjector.c" \
-    "$DIR/trois-inject.c"
-
-# Sign with entitlements for task_for_pid
-codesign --force --sign - --entitlements "$DIR/trois-inject.entitlements" "$DIR/trois-inject"
-
-echo "Built: $DIR/trois-inject"
-echo ""
-echo "Done!"

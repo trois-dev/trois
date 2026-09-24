@@ -31,20 +31,26 @@ static IMP originalMinimizeDrawRect = NULL;
 static IMP originalZoomDrawRect = NULL;
 static IMP originalHelpDrawRect = NULL;
 
+// Filled on first draw and cleared on TroisThemeChanged. drawRect: runs on the main thread.
+static NSUserDefaults *troisDefaults = nil;
+static NSMutableDictionary<NSString *, id> *imageCache = nil;
+
 static NSImage* loadButtonImage(NSString *buttonType, NSString *state) {
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:TROIS_PREFS];
+    if (!troisDefaults) troisDefaults = [[NSUserDefaults alloc] initWithSuiteName:TROIS_PREFS];
+    if (!imageCache) imageCache = [NSMutableDictionary dictionary];
     NSString *key = [NSString stringWithFormat:@"%@Button%@Image", buttonType, state];
-    NSString *path = [defaults stringForKey:key];
-    if (path) {
-        return [[NSImage alloc] initWithContentsOfFile:path];
-    }
-    return nil;
+    id cached = imageCache[key];
+    if (cached) return cached == [NSNull null] ? nil : cached;
+
+    NSString *path = [troisDefaults stringForKey:key];
+    NSImage *image = path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
+    imageCache[key] = image ?: [NSNull null];
+    return image;
 }
 
 static void drawButtonImage(NSView *self, NSRect dirtyRect, NSString *buttonType, IMP originalIMP) {
-    // Check if Trois theming is enabled
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:TROIS_PREFS];
-    if (![defaults boolForKey:@"troisEnabled"]) {
+    if (!troisDefaults) troisDefaults = [[NSUserDefaults alloc] initWithSuiteName:TROIS_PREFS];
+    if (![troisDefaults boolForKey:@"troisEnabled"]) {
         if (originalIMP) {
             ((void (*)(id, SEL, NSRect))originalIMP)(self, @selector(drawRect:), dirtyRect);
         }
@@ -175,7 +181,7 @@ static void hookClass(Class cls, IMP *originalIMP, IMP newIMP) {
 }
 
 + (void)themeChanged:(NSNotification *)note {
-    // Force redraw of all windows
+    [imageCache removeAllObjects];
     for (NSWindow *window in [NSApp windows]) {
         [window.contentView setNeedsDisplay:YES];
         // Force titlebar redraw
