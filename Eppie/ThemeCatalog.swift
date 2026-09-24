@@ -210,7 +210,7 @@ final class ThemeCatalog: ObservableObject {
             return url
         }
         #endif
-        return URL(string: "https://sryo.github.io/trois-themes/index.json")!
+        return URL(string: "https://trois-dev.github.io/trois-themes/index.json")!
     }
 
     @Published private(set) var themes: [CatalogTheme] = []

@@ -715,7 +715,7 @@ struct CreditsView: View {
             section("Themes") {
                 Text("Each theme is the work of the author named on it. If you made one and want it credited differently or removed, open an issue.")
                     .fixedSize(horizontal: false, vertical: true)
-                Link("github.com/sryo/trois-themes/issues", destination: URL(string: "https://github.com/sryo/trois-themes/issues")!)
+                Link("github.com/trois-dev/trois-themes/issues", destination: URL(string: "https://github.com/trois-dev/trois-themes/issues")!)
             }
 
             section("Injection mode") {

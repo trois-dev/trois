@@ -6,7 +6,7 @@ Trois brings back the window themes of classic desktop customizers and keeps the
 
 - **Themed buttons** replace close, minimize and zoom
 - **Window frames** draw each theme's chrome around your windows
-- **One-click install** from the [theme gallery](https://sryo.github.io/trois-themes/)
+- **One-click install** from the [theme gallery](https://trois-dev.github.io/trois-themes/)
 - **Custom tab** to build your own theme or mix parts from others
 
 Made by [sryo](https://github.com/sryo). Not affiliated with the original tools or their authors. See [Credits](#credits).
@@ -55,9 +55,9 @@ To restore default security settings:
 Trois ships without themes. Get them from the catalog:
 
 - In Trois: Settings > Get Themes, then Install.
-- On the web: the gallery at https://sryo.github.io/trois-themes/. Install opens Trois, which downloads the theme and applies it.
+- On the web: the gallery at https://trois-dev.github.io/trois-themes/. Install opens Trois, which downloads the theme and applies it.
 
-The catalog lives in [sryo/trois-themes](https://github.com/sryo/trois-themes). Trois only installs themes listed there and checks each download against the catalog's SHA-256.
+The catalog lives in [trois-dev/trois-themes](https://github.com/trois-dev/trois-themes). Trois only installs themes listed there and checks each download against the catalog's SHA-256.
 
 You can also drop a theme zip or folder onto Settings > Themes, or use Install Theme. Installed themes go in `~/Library/Application Support/Trois/Themes/`.
 
@@ -144,7 +144,7 @@ Themes were collected from:
 - The [Virtual Plastic Eppie gallery](https://www.virtualplastic.net/html/eppie.html)
 - The kaleidoscope.net scheme archive, recovered from the [Internet Archive](https://web.archive.org/)
 
-Each theme is the work of the author named in its `theme.json`. If you made one and want it credited differently or removed, [open an issue](https://github.com/sryo/trois-themes/issues).
+Each theme is the work of the author named in its `theme.json`. If you made one and want it credited differently or removed, [open an issue](https://github.com/trois-dev/trois-themes/issues).
 
 Injection mode uses the same approach as [MacForge](https://github.com/MacEnhance/MacForge).
 
