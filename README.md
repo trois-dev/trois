@@ -9,21 +9,25 @@ Trois brings back the window themes of classic desktop customizers and keeps the
 - **Themed buttons** replace close, minimize and zoom
 - **Window frames** draw each theme's chrome around your windows
 - **One-click install** from the [theme gallery](https://trois-dev.github.io/trois-themes/)
-- **Custom tab** to build your own theme or mix parts from others
+- **Editor tab** to build your own theme or mix parts from others
 
 <p align="center">
-  <img src="docs/screenshots/themes.png" width="49%" alt="Themes tab showing Kaleidoscope window frames">
-  <img src="docs/screenshots/custom.png" width="49%" alt="Custom tab editing a theme in a live preview">
+  <img src="docs/screenshots/themes.png" width="49%" alt="Installed tab showing Kaleidoscope window frames">
+  <img src="docs/screenshots/custom.png" width="49%" alt="Editor tab editing a theme in a live preview">
 </p>
 
 Made by [sryo](https://github.com/sryo). Not affiliated with the original tools or their authors. See [Credits](#credits).
+
+## Install
+
+Download the zip from [Releases](https://github.com/trois-dev/trois/releases), unzip it, move Trois.app to Applications and give it Accessibility permission when asked. Trois needs macOS 13 or later on Apple silicon.
 
 ## Modes
 
 | Mode | Requirements | Description |
 |------|--------------|-------------|
 | **Overlay** | Accessibility permission | Default mode. Uses overlay windows. |
-| **Injection** | SIP disabled | Hooks into apps directly. Seamless. |
+| **Injection** | SIP partly disabled | Hooks into apps directly. Seamless. Asks for an admin password to inject. |
 
 ## Enabling Injection Mode
 
@@ -38,9 +42,7 @@ sudo defaults write /Library/Preferences/com.apple.security.libraryvalidation.pl
 
 ### Step 2: Partially Disable SIP
 
-1. **Enter Recovery Mode**
-   - Apple Silicon: Hold power button until "Loading startup options" → Options → Continue
-   - Intel: Hold ⌘+R during boot
+1. **Enter Recovery Mode**: hold the power button until "Loading startup options", then Options → Continue.
 
 2. **Open Terminal** (Utilities → Terminal) and run:
    ```bash
@@ -61,12 +63,12 @@ To restore default security settings:
 
 Trois ships without themes. Get them from the catalog:
 
-- In Trois: Settings > Get Themes, then Install.
+- In Trois: Settings > Gallery, then Install.
 - On the web: the gallery at https://trois-dev.github.io/trois-themes/. Install opens Trois, which downloads the theme and applies it.
 
 The catalog lives in [trois-dev/trois-themes](https://github.com/trois-dev/trois-themes). Trois only installs themes listed there and verifies each download before installing it.
 
-You can also drop a theme zip or folder onto Settings > Themes, or use Install Theme. Installed themes go in `~/Library/Application Support/Trois/Themes/`.
+You can also drop a theme zip or folder onto Settings > Installed, or use Install Theme. Installed themes go in `~/Library/Application Support/Trois/Themes/`.
 
 ## Creating Themes
 
@@ -92,7 +94,7 @@ A theme is a folder of button images (BMP, PNG, JPEG, GIF or TIFF) with a `theme
 }
 ```
 
-Button keys: `close`, `closeDown`, `closeDisabled`, `minimize`, `minimizeDown`, `minimizeDisabled`, `zoom`, `zoomDown`, `zoomDisabled`, `restore`, `restoreDown`, `help`, `helpDown`. Restore images show on the Zoom button while a window is zoomed or full screen.
+Button keys: `close`, `closeHover`, `closeDown`, `closeDisabled`, `minimize`, `minimizeHover`, `minimizeDown`, `minimizeDisabled`, `zoom`, `zoomHover`, `zoomDown`, `zoomDisabled`, `restore`, `restoreDown`, `help`, `helpHover`, `helpDown`, `helpDisabled`. Hover images show while the pointer is over a button, and disabled ones in windows that aren't focused. Restore images show on the Zoom button while a window is zoomed or full screen.
 
 `engine` and `source` are optional. `engine` names the tool the theme was made for and shows under the theme's name; leave it out for themes made for Trois. `source` links to the original download or gallery.
 
@@ -123,7 +125,7 @@ Kaleidoscope 1.x, drawn by Kaleidoscope's fixed 1.x rules:
 | `stripes_pattern.png` | Pattern behind the stripes (optional) |
 | `layout.json` | `{"format": "k1"}` |
 
-1.x frames use the theme's own `close`, `min` and `max` button images as the title bar boxes. The frame's close, zoom and collapse boxes press the window's close, zoom and minimize buttons, and dragging the frame moves the window. Turn borders off in Settings > Themes.
+1.x frames use the theme's own `close`, `min` and `max` button images as the title bar boxes. The frame's close, zoom and collapse boxes press the window's close, zoom and minimize buttons, and dragging the frame moves the window. Turn frames off with Show frame in Settings > Installed.
 
 ## Supported Engines
 
