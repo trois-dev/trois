@@ -124,9 +124,37 @@ struct FramePreviewView<Buttons: View>: View {
                 .offset(x: preview.window.minX, y: preview.window.minY)
             Image(decorative: preview.image, scale: 2)
                 .interpolation(.none)
+            WindowCorners(window: preview.window)
             buttons
                 .offset(x: preview.window.minX + 8, y: preview.window.minY + 8)
         }
         .frame(width: preview.size.width, height: preview.size.height, alignment: .topLeading)
+    }
+}
+
+/// The window's rounded corners, drawn over a frame image. On screen the
+/// window sits above the frame and hides the part of the corner fill that
+/// reaches under its edge. A preview draws the frame over the window, so this
+/// puts the corners back on top. Only the corner squares are drawn, which
+/// stay clear of the buttons at the window's top left.
+struct WindowCorners: View {
+    // Points, top-left origin, in the frame image's space.
+    let window: CGRect
+
+    var body: some View {
+        let r = min(FramePreviewRenderer.cornerRadius, window.width / 2, window.height / 2)
+        let squares = Path { path in
+            path.addRects([
+                CGRect(x: 0, y: 0, width: r, height: r),
+                CGRect(x: window.width - r, y: 0, width: r, height: r),
+                CGRect(x: 0, y: window.height - r, width: r, height: r),
+                CGRect(x: window.width - r, y: window.height - r, width: r, height: r),
+            ])
+        }
+        RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
+            .fill(Color(nsColor: .windowBackgroundColor))
+            .frame(width: window.width, height: window.height)
+            .mask(squares)
+            .offset(x: window.minX, y: window.minY)
     }
 }

@@ -388,7 +388,8 @@ struct CatalogButtonImage: View {
 }
 
 /// A catalog theme's frame, laid out like FramePreviewView: the window, the
-/// frame image over it with the buttons already drawn in, and the title.
+/// frame image over it with the buttons already drawn in, the window's
+/// corners and the title.
 /// Frames bigger than the canvas are centered and clipped.
 struct CatalogFramePreview: View {
     let frame: CatalogFrame
@@ -428,6 +429,7 @@ struct CatalogFramePreview: View {
                     .resizable()
                     .interpolation(.none)
                     .frame(width: size.width, height: size.height)
+                WindowCorners(window: window)
                 if let box = frame.titleRect, let style = frame.title {
                     titleText(style)
                         .frame(width: box.width, height: box.height)

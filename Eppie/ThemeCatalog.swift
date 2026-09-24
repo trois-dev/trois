@@ -201,6 +201,39 @@ struct CatalogTheme: Decodable, Identifiable, Hashable {
     let download: String
     // Button key (close, minimize, zoom) to a PNG path relative to the index.
     let preview: [String: String]
+    // Absent for themes without a frame and from older indexes.
+    let frame: CatalogFrame?
+}
+
+/// A theme's frame drawn around a small window, buttons included, as the
+/// gallery website shows it. Rects are [x, y, width, height] in points from
+/// the top left; the image is at twice that.
+struct CatalogFrame: Decodable, Hashable {
+    struct Title: Decodable, Hashable {
+        let box: [CGFloat]
+        // "#rgb" or "#rrggbb".
+        let color: String
+        let emboss: String?
+    }
+
+    let image: String
+    let size: [CGFloat]
+    let window: [CGFloat]
+    let title: Title?
+
+    var pointSize: CGSize? {
+        size.count == 2 ? CGSize(width: size[0], height: size[1]) : nil
+    }
+    var windowRect: CGRect? {
+        Self.rect(window)
+    }
+    var titleRect: CGRect? {
+        title.flatMap { Self.rect($0.box) }
+    }
+
+    private static func rect(_ values: [CGFloat]) -> CGRect? {
+        values.count == 4 ? CGRect(x: values[0], y: values[1], width: values[2], height: values[3]) : nil
+    }
 }
 
 private struct CatalogIndex: Decodable {
