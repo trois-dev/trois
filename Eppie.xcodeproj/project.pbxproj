@@ -21,6 +21,7 @@
 		A100002A /* WindowBorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100002B; };
 		C1D00001 /* WindowFrameK1.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D00002; };
 		C1D00003 /* TitleStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D00004; };
+		D7E00001 /* TweaksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7E00002; };
 		A100002C /* FramePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100002D; };
 		E1000001 /* ThemeEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000002; };
 		E1000003 /* ThemeDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000004; };
@@ -45,6 +46,7 @@
 		A100002B /* WindowBorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowBorder.swift; sourceTree = "<group>"; };
 		C1D00002 /* WindowFrameK1.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFrameK1.swift; sourceTree = "<group>"; };
 		C1D00004 /* TitleStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TitleStyle.swift; sourceTree = "<group>"; };
+		D7E00002 /* TweaksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TweaksView.swift; sourceTree = "<group>"; };
 		A100002D /* FramePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FramePreview.swift; sourceTree = "<group>"; };
 		E1000002 /* ThemeEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeEditor.swift; sourceTree = "<group>"; };
 		E1000004 /* ThemeDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeDraft.swift; sourceTree = "<group>"; };
@@ -92,6 +94,7 @@
 				A100002B /* WindowBorder.swift */,
 				C1D00002 /* WindowFrameK1.swift */,
 				C1D00004 /* TitleStyle.swift */,
+				D7E00002 /* TweaksView.swift */,
 				A100002D /* FramePreview.swift */,
 				E1000002 /* ThemeEditor.swift */,
 				E1000004 /* ThemeDraft.swift */,
@@ -183,6 +186,7 @@
 				A100002A /* WindowBorder.swift in Sources */,
 				C1D00001 /* WindowFrameK1.swift in Sources */,
 				C1D00003 /* TitleStyle.swift in Sources */,
+				D7E00001 /* TweaksView.swift in Sources */,
 				A100002C /* FramePreview.swift in Sources */,
 				E1000001 /* ThemeEditor.swift in Sources */,
 				E1000003 /* ThemeDraft.swift in Sources */,

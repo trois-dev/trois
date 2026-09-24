@@ -63,6 +63,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
+    // Opening Trois again while it runs, e.g. from Finder, is the way back when the menu bar icon is hidden.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings(tab: nil)
+        return false
+    }
+
+    func setMenuBarIconHidden(_ hidden: Bool) {
+        UserDefaults.standard.set(hidden, forKey: "hideMenuBarIcon")
+        statusItem.isVisible = !hidden
+    }
+
     // Never shown, since Trois has no Dock icon, but its key equivalents make
     // copy, paste and close work in the Settings window.
     private func setupMainMenu() {
@@ -162,6 +173,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let button = statusItem.button {
             button.image = Self.menuBarImage()
         }
+        statusItem.isVisible = !UserDefaults.standard.bool(forKey: "hideMenuBarIcon")
 
         let menu = NSMenu()
 
@@ -212,19 +224,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // The login item can be removed in System Settings, so its state is read each time the menu opens.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.item(withTag: 300)?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        // Settings can change this too.
+        menu.item(withTag: 200)?.state = UserDefaults.standard.bool(forKey: "allWindowsMode") ? .on : .off
     }
 
     @objc private func toggleLoginItem(_ sender: NSMenuItem) {
-        let service = SMAppService.mainApp
-        switch service.status {
-        case .enabled:
-            setLoginItem(false)
-        case .requiresApproval:
+        setOpenAtLogin(SMAppService.mainApp.status != .enabled)
+    }
+
+    func setOpenAtLogin(_ on: Bool) {
+        if on, SMAppService.mainApp.status == .requiresApproval {
             // Registered but switched off in System Settings, which is the only place to switch it back on.
             SMAppService.openSystemSettingsLoginItems()
-        default:
-            setLoginItem(true)
+        } else {
+            setLoginItem(on)
         }
+        NotificationCenter.default.post(name: .troisStateChanged, object: nil)
     }
 
     private func setLoginItem(_ enabled: Bool) {
@@ -282,15 +297,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleAllWindows(_ sender: NSMenuItem) {
-        let newState = sender.state != .on
-        sender.state = newState ? .on : .off
-        UserDefaults.standard.set(newState, forKey: "allWindowsMode")
+        setAllWindows(sender.state != .on)
+    }
+
+    func setAllWindows(_ on: Bool) {
+        statusItem.menu?.item(withTag: 200)?.state = on ? .on : .off
+        UserDefaults.standard.set(on, forKey: "allWindowsMode")
 
         // Restart tracking with new mode
         if multiWindowTracker != nil {
             stopTracking()
             startTracking()
         }
+        NotificationCenter.default.post(name: .troisStateChanged, object: nil)
     }
 
     private func startTracking() {
@@ -322,8 +341,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleEnabled(_ sender: NSMenuItem) {
-        if sender.state == .on {
-            sender.state = .off
+        setEnabled(sender.state != .on)
+    }
+
+    func setEnabled(_ on: Bool) {
+        if !on {
             if SIPDetector.shared.sipDisabled {
                 // Injected loaders check the flag on every draw.
                 UserDefaults.standard.set(false, forKey: "troisEnabled")
@@ -333,7 +355,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         } else {
             if SIPDetector.shared.sipDisabled {
-                sender.state = .on
                 UserDefaults.standard.set(true, forKey: "troisEnabled")
                 Injector.shared.notifyThemeChanged()
             } else {
@@ -343,11 +364,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let accessEnabled = AXIsProcessTrustedWithOptions(options)
 
                 if accessEnabled {
-                    sender.state = .on
                     startTracking()
                 }
             }
         }
+        updateMenuState()
     }
 
     @objc private func openSettings() {
@@ -376,7 +397,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    @objc private func requestAccessibilityPermission() {
+    @objc func requestAccessibilityPermission() {
         if AXIsProcessTrusted() {
             // Only start overlay tracking in overlay mode
             if !SIPDetector.shared.sipDisabled, isEnabled {
@@ -397,6 +418,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateMenuState() {
+        NotificationCenter.default.post(name: .troisStateChanged, object: nil)
         guard let menu = statusItem.menu else { return }
         if let enabledItem = menu.item(withTitle: "Enabled") {
             let on = SIPDetector.shared.sipDisabled ? isEnabled : multiWindowTracker != nil
@@ -414,4 +436,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
     }
+}
+
+extension Notification.Name {
+    /// Posted when Enabled, All Windows, Open at Login or permissions change.
+    static let troisStateChanged = Notification.Name("TroisStateChanged")
 }

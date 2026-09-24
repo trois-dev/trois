@@ -399,6 +399,7 @@ class MultiWindowTracker {
     private func apply(windowList infoList: [[String: Any]]) {
         let myPID = ProcessInfo.processInfo.processIdentifier
         let myBundleID = Bundle.main.bundleIdentifier
+        let excluded = ExcludedApps.current
 
         var candidates: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
         var newStack: [CGWindowID] = []
@@ -452,7 +453,8 @@ class MultiWindowTracker {
 
             guard let app = NSRunningApplication(processIdentifier: pid),
                   app.activationPolicy == .regular,
-                  app.bundleIdentifier != myBundleID else {
+                  app.bundleIdentifier != myBundleID,
+                  !excluded.contains(app.bundleIdentifier ?? "") else {
                 continue
             }
 

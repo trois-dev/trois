@@ -2,7 +2,7 @@
 import SwiftUI
 
 enum SettingsTab: Hashable {
-    case themes, getThemes, custom, about
+    case themes, getThemes, custom, tweaks, about
 }
 
 // Lets the app open Settings on a given tab, e.g. for a trois:// link.
@@ -28,6 +28,10 @@ struct SettingsView: View {
             ThemeEditorView()
                 .tabItem { Label("Editor", systemImage: "slider.horizontal.3") }
                 .tag(SettingsTab.custom)
+
+            TweaksView()
+                .tabItem { Label("Tweaks", systemImage: "switch.2") }
+                .tag(SettingsTab.tweaks)
 
             AboutView()
                 .tabItem { Label("About", systemImage: "info.circle") }
@@ -525,7 +529,7 @@ private func normalizedImage(_ image: NSImage) -> NSImage {
     return image
 }
 
-private func reloadOverlays() {
+func reloadOverlays() {
     NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
 }
 
@@ -616,27 +620,6 @@ struct ThemePickerView: View {
                 .padding()
             }
 
-            // Always shown, since they change every card, not just the applied theme.
-            Divider()
-            HStack(spacing: 16) {
-                Picker("Button art:", selection: $buttonSizing) {
-                    ForEach(ButtonArt.Sizing.allCases, id: \.rawValue) { mode in
-                        Text(mode.title).tag(mode.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                .help(ButtonArt.Sizing.allCases.map { "\($0.title): \($0.help)" }.joined(separator: "\n"))
-                Spacer()
-                // Stacked: side by side they don't fit next to the picker.
-                VStack(alignment: .leading, spacing: 4) {
-                    FrameOptionToggles()
-                }
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .onChange(of: buttonSizing) { _ in reloadOverlays() }
-
             Divider()
 
             // Bottom toolbar
@@ -726,43 +709,63 @@ struct ThemePickerView: View {
 
     // Sized and spaced like the macOS 27 buttons.
     private var defaultPreview: some View {
-        HStack(spacing: 9) {
-            Circle().fill(Color.red).frame(width: 14, height: 14)
-            Circle().fill(Color.yellow).frame(width: 14, height: 14)
-            Circle().fill(Color.green).frame(width: 14, height: 14)
+        ThemeButtonsPreview(theme: nil, sizing: .bleed)
+    }
+
+    private func themePreview(_ theme: Theme) -> some View {
+        ThemeButtonsPreview(theme: theme, sizing: ButtonArt.Sizing(rawValue: buttonSizing) ?? .bleed)
+    }
+}
+
+/// A theme's close, minimize and zoom art as a row, or the system circles
+/// when there's no theme or no art for a button.
+struct ThemeButtonsPreview: View {
+    let theme: Theme?
+    let sizing: ButtonArt.Sizing
+    // Draws each image this many times larger, one pixel to a block.
+    var zoom: CGFloat = 1
+
+    var body: some View {
+        if let theme {
+            // Trimmed and sized like the overlays, so the art lines up the way it does on screen.
+            HStack(spacing: 4 * zoom) {
+                button(theme.closeUp, [theme.closeHover, theme.closeDown, theme.closeDisabled], .red)
+                button(theme.minimizeUp, [theme.minimizeHover, theme.minimizeDown, theme.minimizeDisabled], .yellow)
+                button(theme.maximizeUp, [theme.maximizeHover, theme.maximizeDown, theme.maximizeDisabled,
+                                          theme.restoreUp, theme.restoreDown], .green)
+            }
+        } else {
+            HStack(spacing: 9 * zoom) {
+                circle(.red)
+                circle(.yellow)
+                circle(.green)
+            }
         }
     }
 
-    // Trimmed and sized like the overlays, so the art lines up the way it does on screen.
-    private func themePreview(_ theme: Theme) -> some View {
-        let mode = ButtonArt.Sizing(rawValue: buttonSizing) ?? .bleed
-        func upImage(_ states: [URL?]) -> NSImage? {
-            ButtonArt.load(states.map { $0?.path }, trim: mode != .original)[0]
-                .map { ButtonArt.sized($0, cover: 14, backing: 2, mode: mode) }
+    @ViewBuilder
+    private func button(_ up: URL?, _ others: [URL?], _ color: Color) -> some View {
+        if let image = ButtonArt.load(([up] + others).map { $0?.path }, trim: sizing != .original)[0]
+            .map({ ButtonArt.sized($0, cover: 14, backing: 2, mode: sizing) }) {
+            ZStack {
+                Image(nsImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: image.size.width * zoom, height: image.size.height * zoom)
+                // Enlarged, outlines the system button the art has to cover.
+                if zoom > 1 {
+                    Circle()
+                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                        .frame(width: 14 * zoom, height: 14 * zoom)
+                }
+            }
+        } else {
+            circle(color)
         }
-        return HStack(spacing: 4) {
-            if let image = upImage([theme.closeUp, theme.closeHover, theme.closeDown, theme.closeDisabled]) {
-                Image(nsImage: image)
-                    .interpolation(.none)
-            } else {
-                Circle().fill(Color.red).frame(width: 14, height: 14)
-            }
+    }
 
-            if let image = upImage([theme.minimizeUp, theme.minimizeHover, theme.minimizeDown, theme.minimizeDisabled]) {
-                Image(nsImage: image)
-                    .interpolation(.none)
-            } else {
-                Circle().fill(Color.yellow).frame(width: 14, height: 14)
-            }
-
-            if let image = upImage([theme.maximizeUp, theme.maximizeHover, theme.maximizeDown, theme.maximizeDisabled,
-                                    theme.restoreUp, theme.restoreDown]) {
-                Image(nsImage: image)
-                    .interpolation(.none)
-            } else {
-                Circle().fill(Color.green).frame(width: 14, height: 14)
-            }
-        }
+    private func circle(_ color: Color) -> some View {
+        Circle().fill(color).frame(width: 14 * zoom, height: 14 * zoom)
     }
 }
 
@@ -1021,6 +1024,11 @@ struct AboutView: View {
 
     var body: some View {
         VStack(spacing: 16) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 96, height: 96)
+                .accessibilityHidden(true)
+
             Text("Trois")
                 .font(.system(size: 48, weight: .ultraLight))
 
