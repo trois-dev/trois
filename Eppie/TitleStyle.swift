@@ -67,7 +67,7 @@ struct TitleStyle: Equatable {
     var alignment: Alignment?
     // "#rrggbb" or "#rrggbbaa". Nil picks one from the art.
     var color: String?
-    // Nil dims the active color, or picks one from the inactive art.
+    // Nil takes the one the inactive art holds, or dims a set active color.
     var inactiveColor: String?
     var shadow = ShadowSetting.auto
 
@@ -150,6 +150,7 @@ struct TitleStyle: Equatable {
 
     /// Settles the style against what the frame picks from its art.
     /// `autoInactive` is nil when inactive titles just dim the active color.
+    /// `autoShadow` is the emboss the art holds for this state.
     func resolved(active: Bool, autoColor: NSColor, autoInactive: NSColor?, autoShadow: NSColor?) -> ResolvedTitle {
         let dim = { (c: NSColor) in c.withAlphaComponent(c.alphaComponent * 0.55) }
         let activeColor = color.flatMap(Self.color) ?? autoColor

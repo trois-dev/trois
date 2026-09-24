@@ -841,22 +841,48 @@ struct WindowFrame {
         k1 != nil ? k1Title(active ? self.active : inactive, active: active) : resolvedTitle(active: active)
     }
 
+    // Kaleidoscope 2.3.1 (PowerPC kDEF 1, 0x560c) takes the title color from
+    // the pixel at the content rect's top left in the active or inactive art,
+    // and the emboss from the pixel right of it, drawn 1 point down and right
+    // unless it matches the text.
     private func resolvedTitle(active: Bool) -> ResolvedTitle {
-        // Light text on dark title bars, dark on light ones.
-        let light = titleBackgroundIsDark(active ? self.active : inactive)
-        return titleStyle.resolved(active: active, autoColor: light ? .white : .black, autoInactive: nil, autoShadow: nil)
+        func text(_ image: CGImage) -> NSColor {
+            Self.storedColor(image, x: Int(content.minX), y: Int(content.minY)) ?? .black
+        }
+        let image = active ? self.active : inactive
+        let emboss = Self.storedColor(image, x: Int(content.minX) + 1, y: Int(content.minY))
+        return titleStyle.resolved(active: active, autoColor: text(self.active), autoInactive: text(inactive),
+                                   autoShadow: emboss.map(TitleStyle.hex) == TitleStyle.hex(text(image)) ? nil : emboss)
     }
 
-    private func titleBackgroundIsDark(_ image: CGImage) -> Bool {
-        guard let rect = rects[4], let crop = image.cropping(to: rect),
+    /// A pixel's color as stored, even where the art is transparent there:
+    /// Kaleidoscope read these from the icon's palette whatever its mask said.
+    /// Premultiplied or unusual layouts fall back to drawing the pixel, which
+    /// loses the color under full transparency.
+    static func storedColor(_ image: CGImage, x: Int, y: Int) -> NSColor? {
+        guard x >= 0, y >= 0, x < image.width, y < image.height else { return nil }
+        let alpha = image.alphaInfo
+        let premultiplied = alpha == .premultipliedFirst || alpha == .premultipliedLast
+        if image.bitsPerComponent == 8, image.bitsPerPixel == 32, !premultiplied,
+           image.colorSpace?.model == .rgb, let data = image.dataProvider?.data,
+           let bytes = CFDataGetBytePtr(data) {
+            let p = bytes + y * image.bytesPerRow + x * 4
+            var c = [p[0], p[1], p[2], p[3]]
+            // Little-endian 32-bit pixels are stored back to front.
+            if image.byteOrderInfo == .order32Little { c.reverse() }
+            let first = alpha == .first || alpha == .noneSkipFirst
+            let rgb = first ? Array(c[1...3]) : Array(c[0...2])
+            return NSColor(srgbRed: CGFloat(rgb[0]) / 255, green: CGFloat(rgb[1]) / 255, blue: CGFloat(rgb[2]) / 255, alpha: 1)
+        }
+        guard let pixel = image.cropping(to: CGRect(x: x, y: y, width: 1, height: 1)),
               let context = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-        context.interpolationQuality = .medium
-        context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-        guard let p = context.data?.assumingMemoryBound(to: UInt8.self) else { return false }
-        let luma = 0.299 * Double(p[0]) + 0.587 * Double(p[1]) + 0.114 * Double(p[2])
-        return luma < 128
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.draw(pixel, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard let p = context.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        let a = CGFloat(p[3]) / 255
+        guard a > 0 else { return nil }
+        return NSColor(srgbRed: CGFloat(p[0]) / 255 / a, green: CGFloat(p[1]) / 255 / a, blue: CGFloat(p[2]) / 255 / a, alpha: 1)
     }
 
     func drawTitle(_ title: String, in rect: CGRect, style: ResolvedTitle, context: CGContext) {

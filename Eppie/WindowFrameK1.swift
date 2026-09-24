@@ -9,7 +9,9 @@ import Cocoa
 //   from column/row 6. The small square inside is ignored.
 // - The title bar is 22 points: icon rows 0-2, row 3 stretched, rows 4-5.
 //   Row 3 also holds the title color (columns 7-8) and the emboss color
-//   (column 9, unused when it matches the background in column 6).
+//   (column 9, skipped when it matches the title color). Verified against
+//   Kaleidoscope 2.3.1's 680x0 kDEF 0, which reads (6,3), (7,3) and (9,3).
+//   Its skip compares emboss with text, not background, despite the docs.
 // - Active windows stretch the racing stripes icon across rows 4-16, 3 points
 //   clear of the widgets and 6 points clear of the title: its left and right
 //   halves draw as-is and the middle column stretches between them, like the
@@ -211,8 +213,7 @@ extension WindowFrame {
     }
 
     private func k1EmbossColor(_ icon: CGImage) -> NSColor? {
-        guard let emboss = k1Pixel(icon, x: 9, y: 3), let background = k1Pixel(icon, x: 6, y: 3),
-              emboss != background else { return nil }
+        guard let emboss = k1Pixel(icon, x: 9, y: 3), emboss != k1Pixel(icon, x: 7, y: 3) else { return nil }
         return NSColor(cgColor: emboss)
     }
 }
