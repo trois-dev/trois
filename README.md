@@ -2,7 +2,7 @@
 
 # Trois
 
-Trois brings back the window themes of classic desktop customizers and keeps them working on a modern Mac. Themes from any engine are converted to one format, so new sources can be added without touching the app.
+Trois brings back the window themes of classic desktop customizers and keeps them working on a modern Mac.
 
 **Features:**
 
@@ -64,7 +64,7 @@ Trois ships without themes. Get them from the catalog:
 - In Trois: Settings > Get Themes, then Install.
 - On the web: the gallery at https://trois-dev.github.io/trois-themes/. Install opens Trois, which downloads the theme and applies it.
 
-The catalog lives in [trois-dev/trois-themes](https://github.com/trois-dev/trois-themes). Trois only installs themes listed there and checks each download against the catalog's SHA-256.
+The catalog lives in [trois-dev/trois-themes](https://github.com/trois-dev/trois-themes). Trois only installs themes listed there and verifies each download before installing it.
 
 You can also drop a theme zip or folder onto Settings > Themes, or use Install Theme. Installed themes go in `~/Library/Application Support/Trois/Themes/`.
 
@@ -109,7 +109,7 @@ Kaleidoscope 2.x, from the scheme's document window:
 | `active.png` | Window chrome for the focused window |
 | `inactive.png` | Chrome for other windows (optional) |
 | `pressed.png` | Pressed close, zoom and collapse boxes, left to right (optional) |
-| `layout.json` | The scheme's `wnd#` layout: content, widget and title rects plus the part lists for each edge |
+| `layout.json` | Where the window, buttons and title sit in the images, and which edges stretch |
 
 The window sits in the content rect; everything around it draws outside the window, one point per image pixel.
 
@@ -127,17 +127,13 @@ Kaleidoscope 1.x, drawn by Kaleidoscope's fixed 1.x rules:
 
 ## Supported Engines
 
-| Engine | Buttons | Frame | Converter |
-|--------|---------|-------|-----------|
-| EppieDesktop | Yes | No | None, themes are used as they are |
-| Kaleidoscope 2.x | Yes | Yes | `kaleidoscope/tools/convert.py` |
-| Kaleidoscope 1.x | Yes | Yes | `kaleidoscope/tools/convert.py` |
+| Engine | Buttons | Frame |
+|--------|---------|-------|
+| EppieDesktop | Yes | No |
+| Kaleidoscope 2.x | Yes | Yes |
+| Kaleidoscope 1.x | Yes | Yes |
 
-### Adding an Engine
-
-1. Write a converter that outputs button images and a `theme.json` with `engine` and `source` set.
-2. If the engine has window frames, write a `frame/` folder. Reuse the 2.x layout format if it fits; otherwise give `layout.json` a new `format` value and add a renderer next to `WindowFrameK1.swift`.
-3. Add a row to the table above, and credit the archive the themes came from below and in the app's Credits view (`CreditsView` in `SettingsView.swift`).
+Want to add another? See [CONTRIBUTING](CONTRIBUTING.md#adding-a-theme-engine).
 
 ## Credits
 

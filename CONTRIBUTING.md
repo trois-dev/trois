@@ -29,7 +29,11 @@ Overlay mode only needs the Accessibility permission. You don't need to disable 
 
 ## Adding a theme engine
 
-See [Adding an Engine](README.md#adding-an-engine) in the README. Converters should output the standard `theme.json` format so the app doesn't need engine-specific code for buttons.
+Themes from any engine are converted to the standard `theme.json` format, so the app doesn't need engine-specific code for buttons.
+
+1. Write a converter that outputs button images and a `theme.json` with `engine` and `source` set.
+2. If the engine has window frames, write a `frame/` folder. Reuse the Kaleidoscope 2.x layout format if it fits; otherwise give `layout.json` a new `format` value and add a renderer next to `WindowFrameK1.swift`.
+3. Add a row to [Supported Engines](README.md#supported-engines), and credit the archive the themes came from in the README and in the app's Credits view (`CreditsView` in `SettingsView.swift`).
 
 ## License
 
