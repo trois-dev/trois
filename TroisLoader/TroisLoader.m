@@ -50,7 +50,8 @@ static NSImage* loadButtonImage(NSString *buttonType, NSString *state) {
 
 static void drawButtonImage(NSView *self, NSRect dirtyRect, NSString *buttonType, IMP originalIMP) {
     if (!troisDefaults) troisDefaults = [[NSUserDefaults alloc] initWithSuiteName:TROIS_PREFS];
-    if (![troisDefaults boolForKey:@"troisEnabled"]) {
+    if (![troisDefaults boolForKey:@"troisEnabled"] ||
+        [[troisDefaults arrayForKey:@"excludedApps"] containsObject:NSBundle.mainBundle.bundleIdentifier ?: @""]) {
         if (originalIMP) {
             ((void (*)(id, SEL, NSRect))originalIMP)(self, @selector(drawRect:), dirtyRect);
         }

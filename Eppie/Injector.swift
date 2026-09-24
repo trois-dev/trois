@@ -97,6 +97,7 @@ class Injector: NSObject {
         app.activationPolicy == .regular
             && app.bundleIdentifier != nil
             && app.bundleIdentifier != Bundle.main.bundleIdentifier
+            && !ExcludedApps.current.contains(app.bundleIdentifier ?? "")
             && app.executableArchitecture == NSBundleExecutableArchitectureARM64
     }
 
