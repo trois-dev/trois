@@ -238,7 +238,6 @@ struct CatalogCard: View {
     let showsWindow: Bool
     @ObservedObject var catalog = ThemeCatalog.shared
     @ObservedObject var themeManager = ThemeManager.shared
-    @State private var hovering = false
 
     private var hasUpdate: Bool {
         installed.map { ($0.version ?? 0) < entry.version } ?? false
@@ -258,11 +257,11 @@ struct CatalogCard: View {
             isSelected: isApplied,
             previewSize: previewSize,
             badge: AnyView(badge),
+            hoverLabel: hoverLabel,
             preview: preview
         ) {
             activate()
         }
-        .onHover { hovering = $0 }
         .help(hint)
         .contextMenu {
             if let source = entry.source.flatMap(URL.init(string:)),
@@ -296,7 +295,13 @@ struct CatalogCard: View {
         return isApplied ? "Applied" : "Apply"
     }
 
-    // Download shows only on hover, so the grid stays quiet.
+    private var hoverLabel: String? {
+        if isInstalling || isApplied { return nil }
+        if installed == nil { return "Install" }
+        return hasUpdate ? "Update" : "Apply"
+    }
+
+    // Only lasting states; the action shows on hover in the middle.
     @ViewBuilder
     private var badge: some View {
         if isInstalling {
@@ -305,8 +310,6 @@ struct CatalogCard: View {
             symbol("arrow.up.circle.fill", .accentColor)
         } else if installed != nil {
             symbol("checkmark.circle.fill", .gray)
-        } else if hovering {
-            symbol("arrow.down.circle.fill", .accentColor)
         }
     }
 
@@ -531,6 +534,7 @@ struct ThemePickerView: View {
                         name: "Default",
                         isSelected: themeManager.currentTheme == nil,
                         previewSize: previewSize,
+                        hoverLabel: themeManager.currentTheme == nil ? nil : "Apply",
                         preview: showsFrames ? AnyView(plainWindow(defaultPreview)) : AnyView(defaultPreview)
                     ) {
                         themeManager.clearTheme()
@@ -543,6 +547,7 @@ struct ThemePickerView: View {
                             engine: theme.engine,
                             isSelected: themeManager.currentTheme?.id == theme.id,
                             previewSize: previewSize,
+                            hoverLabel: themeManager.currentTheme?.id == theme.id ? nil : "Apply",
                             preview: cardPreview(theme)
                         ) {
                             themeManager.applyTheme(theme)
@@ -713,8 +718,12 @@ struct ThemeCard<Preview: View>: View {
     var previewSize = CGSize(width: 120, height: 60)
     // Status icon in the preview's top-right corner.
     var badge: AnyView? = nil
+    // What clicking does, shown in the middle of the preview on hover. Nil
+    // shows nothing, e.g. for the applied theme.
+    var hoverLabel: String? = nil
     let preview: Preview
     let action: () -> Void
+    @State private var hovering = false
 
     // Large previews hold a whole window, so they sit on a desktop-like backdrop.
     private var backdrop: Color {
@@ -728,10 +737,15 @@ struct ThemeCard<Preview: View>: View {
                     .fill(backdrop)
                     .frame(width: previewSize.width, height: previewSize.height)
                     .overlay(preview)
+                    .overlay {
+                        if hovering, let hoverLabel {
+                            hoverButton(hoverLabel)
+                        }
+                    }
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(
                         RoundedRectangle(cornerRadius: 6)
-                            .stroke(isSelected ? Color.accentColor : Color.gray.opacity(0.3), lineWidth: isSelected ? 2 : 1)
+                            .strokeBorder(outlined ? Color.accentColor : Color.gray.opacity(0.3), lineWidth: outlined ? 3 : 1)
                     )
                     .overlay(alignment: .topTrailing) {
                         if let badge {
@@ -761,6 +775,27 @@ struct ThemeCard<Preview: View>: View {
         }
         .buttonStyle(.plain)
         .frame(width: previewSize.width)
+        .onHover { hovering = $0 }
+    }
+
+    // Matches the website's cards: 3 points of accent when applied or hovered.
+    private var outlined: Bool {
+        isSelected || hovering
+    }
+
+    // Only a label; the whole card is the button.
+    private func hoverButton(_ label: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.15)
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.accentColor))
+                .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
+        }
+        .allowsHitTesting(false)
     }
 }
 
