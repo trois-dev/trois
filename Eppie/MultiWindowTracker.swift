@@ -21,8 +21,9 @@ class MultiWindowTracker {
     // False follows only the focused window of the frontmost app.
     private let allWindows: Bool
     private var overlayManagers: [CGWindowID: OverlayManager] = [:]
-    // Windows with no AX match or no buttons, with when they were last tried.
-    private var rejected: [CGWindowID: CFAbsoluteTime] = [:]
+    // Windows with no AX match or no buttons, with when they were last tried
+    // and how many times in a row they failed.
+    private var rejected: [CGWindowID: (at: CFAbsoluteTime, failures: Int)] = [:]
     private var subscribed: [CGWindowID] = []
     private var draggingWindows: Set<CGWindowID> = []
     private var settleWork: [CGWindowID: DispatchWorkItem] = [:]
@@ -64,6 +65,9 @@ class MultiWindowTracker {
     private static let settleDelay: TimeInterval = 0.1
     private static let maxFollowUpReads = 3
     private static let rejectRetry: CFAbsoluteTime = 1.0
+    // Retries of a rejected window back off to this, so windows that never get
+    // buttons don't cost an AX lookup every second.
+    private static let maxRejectRetry: CFAbsoluteTime = 16.0
     // Resize events can arrive before the window server's final size.
     private static let resizeFollowUpDelay: TimeInterval = 0.032
     // A reorder event can come before the app finishes raising its other windows.
@@ -508,7 +512,8 @@ class MultiWindowTracker {
                 continue
             }
 
-            if let tried = rejected[wid], now - tried < Self.rejectRetry { continue }
+            if let tried = rejected[wid],
+               now - tried.at < min(Self.rejectRetry * pow(2, Double(tried.failures - 1)), Self.maxRejectRetry) { continue }
             if lookingUp.insert(wid).inserted {
                 lookups[candidate.pid, default: []].append((wid, candidate.frame))
             }
@@ -580,7 +585,7 @@ class MultiWindowTracker {
             let manager = OverlayManager(targetWID: wid, pid: pid)
             guard manager.apply(read) else {
                 manager.removeAllOverlays()
-                rejected[wid] = now
+                rejected[wid] = (now, (rejected[wid]?.failures ?? 0) + 1)
                 continue
             }
             manager.didRefresh = { [weak self] read, changed in

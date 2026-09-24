@@ -437,9 +437,9 @@ class OverlayManager {
     }
 
     func reloadImages() {
-        closeOverlay?.loadCustomImage()
-        minimizeOverlay?.loadCustomImage()
-        zoomOverlay?.loadCustomImage()
+        closeOverlay?.reloadTheme()
+        minimizeOverlay?.reloadTheme()
+        zoomOverlay?.reloadTheme()
         // The theme's frame may have come or gone; the next read sets it up.
         refresh()
     }
@@ -695,6 +695,9 @@ class OverlayWindow: NSWindow {
     private var appKitStale = false
     // Covered parts currently masked out, in view coordinates. Nil forces an update.
     private var clipRects: [CGRect]? = []
+    // Sized art by key, state, cover, scale and sizing mode, so hovering doesn't
+    // reload and reprocess files. Nil entries remember a missing image.
+    private var artCache: [String: NSImage?] = [:]
 
     init(buttonType: TrafficLightType) {
         self.buttonType = buttonType
@@ -747,6 +750,21 @@ class OverlayWindow: NSWindow {
         loadImageForState("")
     }
 
+    /// Reads the theme's files again after they changed.
+    func reloadTheme() {
+        artCache.removeAll()
+        reloadImageForMouseState()
+    }
+
+    // The mouse can be inside when the window goes, e.g. after a click on close.
+    override func close() {
+        if isMouseInside {
+            isMouseInside = false
+            NSCursor.pop()
+        }
+        super.close()
+    }
+
     func loadHoverImage() {
         loadImageForState("Hover")
     }
@@ -785,8 +803,7 @@ class OverlayWindow: NSWindow {
             baseKey = windowIsZoomed ? "restoreButton" : "zoomButton"
         }
 
-        if let file = trimmedImage(baseKey, state: state) {
-            let image = coveringSystemButton(file)
+        if let image = art(baseKey, state: state) {
             imageView.image = image
             // Update size based on image if this is the normal state
             if state.isEmpty {
@@ -794,8 +811,7 @@ class OverlayWindow: NSWindow {
             }
         } else if state.isEmpty {
             // Fallback: try zoom button images if restore not available
-            if windowIsZoomed, let file = trimmedImage("zoomButton", state: state) {
-                let image = coveringSystemButton(file)
+            if windowIsZoomed, let image = art("zoomButton", state: state) {
                 imageView.image = image
                 updateImageSize(image.size)
                 return
@@ -820,10 +836,16 @@ class OverlayWindow: NSWindow {
         return ButtonArt.load(keys.map { defaults.string(forKey: $0) }, trim: trim)[index]
     }
 
-    /// Fits an image smaller than the system button's circle over it, per the
-    /// Buttons setting.
-    private func coveringSystemButton(_ image: NSImage) -> NSImage {
-        ButtonArt.sized(image, cover: coverSize, backing: backingScale, mode: .current)
+    /// The trimmed image, fitted over the system button's circle per the Buttons setting.
+    private func art(_ baseKey: String, state: String) -> NSImage? {
+        let mode = ButtonArt.Sizing.current
+        let key = "\(baseKey)\(state)|\(coverSize)|\(backingScale)|\(mode.rawValue)"
+        if let cached = artCache[key] { return cached }
+        let image = trimmedImage(baseKey, state: state).map {
+            ButtonArt.sized($0, cover: coverSize, backing: backingScale, mode: mode)
+        }
+        artCache[key] = image
+        return image
     }
 
     /// Scale of the display under the button. AppKit's own screen can be stale
