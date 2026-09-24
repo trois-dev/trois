@@ -27,6 +27,7 @@ class MultiWindowTracker {
     private var refreshWork: [CGWindowID: DispatchWorkItem] = [:]
     private var scanTimer: Timer?
     private var scanQueued = false
+    private var clippingQueued = false
     // CGWindowListCopyWindowInfo can block for hundreds of ms while the window
     // server is busy, so it's read here and applied on main.
     private let windowListQueue = DispatchQueue(label: "Trois.windowlist", qos: .userInteractive)
@@ -322,21 +323,24 @@ class MultiWindowTracker {
                   let layer = info[kCGWindowLayer as String] as? Int else {
                 continue
             }
-            // Skip our own windows and system UI (layer != 0)
-            if pid == myPID || layer != 0 { continue }
+            // Skip system UI (layer != 0). Our overlays float, so this also
+            // skips them, but our normal windows such as Settings are kept.
+            if layer != 0 { continue }
 
             guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: boundsDict) else {
                 continue
             }
 
-            // Any visible normal window can cover buttons, tracked or not.
+            // Any visible normal window can cover buttons, tracked or not,
+            // Settings included.
             let alpha = info[kCGWindowAlpha as String] as? Double ?? 1
             if alpha > 0 {
                 newStack.append(wid)
                 newFrames[wid] = frame
             }
 
+            if pid == myPID { continue }
             if !allWindows && wid != focusedWID { continue }
 
             // Skip windows without real bounds
@@ -395,6 +399,7 @@ class MultiWindowTracker {
         seenWindows = seen
         rejected = rejected.filter { seen.contains($0.key) }
         updateSubscription()
+        updateActive()
         updateClipping()
 
         for (pid, windows) in lookups {
@@ -451,7 +456,7 @@ class MultiWindowTracker {
             lookingUp.remove(wid)
             // The window may have closed or lost focus while AX was read.
             guard seenWindows.contains(wid), overlayManagers[wid] == nil else { continue }
-            let manager = OverlayManager(targetWID: wid)
+            let manager = OverlayManager(targetWID: wid, pid: pid)
             guard manager.apply(read) else {
                 manager.removeAllOverlays()
                 rejected[wid] = now
@@ -459,6 +464,9 @@ class MultiWindowTracker {
             }
             manager.didRefresh = { [weak self] read, changed in
                 self?.didRefresh(wid, read: read, changed: changed)
+            }
+            manager.didChangeShape = { [weak self] in
+                self?.queueClipping()
             }
             rejected[wid] = nil
             overlayManagers[wid] = manager
@@ -468,17 +476,38 @@ class MultiWindowTracker {
             }
         }
         updateSubscription()
+        updateActive()
         updateClipping()
     }
 
-    // Clips each window's overlays to the parts not covered by windows in front of it.
+    // Coalesces shape changes, e.g. every border redrawing on a focus change,
+    // into one clipping pass.
+    private func queueClipping() {
+        guard !clippingQueued else { return }
+        clippingQueued = true
+        DispatchQueue.main.async { [weak self] in
+            self?.clippingQueued = false
+            self?.updateClipping()
+        }
+    }
+
+    // Clips each window's overlays to the parts not covered by windows in front
+    // of it, borders included.
     private func updateClipping() {
         var covers: [CGRect] = []
         for wid in stack {
-            overlayManagers[wid]?.clip(covering: covers)
+            let manager = overlayManagers[wid]
+            manager?.clip(covering: covers)
             if let frame = frames[wid] {
-                covers.append(frame)
+                covers.append(contentsOf: manager?.coverRects(for: frame) ?? [frame])
             }
+        }
+    }
+
+    // The focused window of the frontmost app draws the active frame.
+    private func updateActive() {
+        for (wid, manager) in overlayManagers {
+            manager.setActive(wid == focusedWID)
         }
     }
 
@@ -505,8 +534,9 @@ class MultiWindowTracker {
     // MARK: - AX lookup
 
     // Scans with the last known focus and scans again if the answer differs.
+    // Borders need it in all-windows mode too, to draw the focused one active.
     private func queryFocus() {
-        guard !allWindows, !focusQueryInFlight else { return }
+        guard !focusQueryInFlight else { return }
         focusQueryInFlight = true
         var pid: pid_t?
         if let frontApp = NSWorkspace.shared.frontmostApplication,

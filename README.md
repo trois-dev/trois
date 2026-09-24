@@ -80,6 +80,19 @@ Button keys: `close`, `closeDown`, `closeDisabled`, `minimize`, `minimizeDown`, 
 
 Without `theme.json`, Trois guesses from file names such as `close_up`, `close_down`, `min_up`, `max_up`, `restore_up` and `help_up` (underscores or spaces). To share a theme, add it to the catalog repo with a pull request.
 
+### Window Borders
+
+A theme can also draw a frame around each window (overlay mode). Add a `frame/` folder with a Kaleidoscope 2 document window:
+
+| File | Contents |
+|------|----------|
+| `active.png` | Window chrome for the focused window |
+| `inactive.png` | Chrome for other windows (optional) |
+| `pressed.png` | Pressed close, zoom and collapse boxes, left to right (optional) |
+| `layout.json` | The scheme's `wnd#` layout: content, widget and title rects plus the part lists for each edge |
+
+The window sits in the content rect; everything around it draws outside the window, one point per image pixel. The frame's close, zoom and collapse boxes press the window's close, zoom and minimize buttons, and dragging the frame moves the window. Turn borders off in Settings > Themes.
+
 ## License
 
 MIT. See [LICENSE](LICENSE). Themes are the work of their authors and are not covered by it.

@@ -169,8 +169,14 @@ struct CatalogCard: View {
     }
 }
 
+private func reloadOverlays() {
+    NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
+}
+
 struct ThemePickerView: View {
     @ObservedObject var themeManager = ThemeManager.shared
+    @AppStorage("windowBorders") private var windowBorders = true
+    @AppStorage("frameButtons") private var frameButtons = false
     @State private var showingInstallSheet = false
     @State private var dragOver = false
     @State private var installError: String?
@@ -211,6 +217,22 @@ struct ThemePickerView: View {
                     }
                 }
                 .padding()
+            }
+
+            // Kaleidoscope themes carry a window frame.
+            if themeManager.currentTheme?.frameDirectory != nil {
+                Divider()
+                HStack {
+                    Toggle("Window Borders", isOn: $windowBorders)
+                    Toggle("Buttons in Frame", isOn: $frameButtons)
+                        .disabled(!windowBorders)
+                        .help("Put the close, zoom and minimize buttons in the frame instead of at the traffic lights")
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .onChange(of: windowBorders) { _ in reloadOverlays() }
+                .onChange(of: frameButtons) { _ in reloadOverlays() }
             }
 
             Divider()

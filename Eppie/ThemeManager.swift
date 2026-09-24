@@ -22,6 +22,8 @@ struct Theme: Identifiable, Hashable {
     var restoreDown: URL?
     var helpUp: URL?
     var helpDown: URL?
+    // Kaleidoscope 2 window frame folder (frame/layout.json and images).
+    var frameDirectory: URL?
 
     var hasAnyImage: Bool {
         closeUp != nil || minimizeUp != nil || maximizeUp != nil
@@ -131,6 +133,7 @@ class ThemeManager: ObservableObject {
             if let buttons = manifest.buttons {
                 applyManifestButtons(buttons, in: directory, to: &theme)
                 if theme.hasAnyImage {
+                    theme.frameDirectory = frameDirectory(in: directory)
                     return theme
                 }
             }
@@ -181,7 +184,13 @@ class ThemeManager: ObservableObject {
             }
         }
 
+        theme.frameDirectory = frameDirectory(in: directory)
         return theme.hasAnyImage ? theme : nil
+    }
+
+    private func frameDirectory(in directory: URL) -> URL? {
+        let frame = directory.appendingPathComponent("frame", isDirectory: true)
+        return fileManager.fileExists(atPath: frame.appendingPathComponent("layout.json").path) ? frame : nil
     }
 
     private func applyManifestButtons(_ buttons: [String: String], in directory: URL, to theme: inout Theme) {
@@ -357,6 +366,8 @@ class ThemeManager: ObservableObject {
         defaults.set(theme.helpUp?.path, forKey: "helpButtonImage")
         defaults.set(theme.helpDown?.path, forKey: "helpButtonPressedImage")
 
+        defaults.set(theme.frameDirectory?.path, forKey: "windowFrameDirectory")
+
         defaults.set(theme.id, forKey: "currentThemeId")
 
         NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
@@ -372,6 +383,7 @@ class ThemeManager: ObservableObject {
                 defaults.removeObject(forKey: prefix + suffix)
             }
         }
+        defaults.removeObject(forKey: "windowFrameDirectory")
         defaults.removeObject(forKey: "currentThemeId")
 
         NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
@@ -380,6 +392,8 @@ class ThemeManager: ObservableObject {
     private func loadCurrentTheme() {
         guard let themeId = UserDefaults.standard.string(forKey: "currentThemeId") else { return }
         currentTheme = themes.first { $0.id == themeId }
+        // A frame may have been added to the theme folder since it was applied.
+        UserDefaults.standard.set(currentTheme?.frameDirectory?.path, forKey: "windowFrameDirectory")
     }
 
     func deleteTheme(_ theme: Theme) {

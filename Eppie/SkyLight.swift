@@ -30,6 +30,15 @@ enum SkyLight {
     static let transactionCommit: TransactionCommitFn? = sym("SLSTransactionCommit")
     static let transactionMove: TransactionMoveFn? = sym("SLSTransactionMoveWindowWithGroup")
     static let registerNotifyProc: RegisterNotifyProcFn? = sym("SLSRegisterNotifyProc")
+    // Regions are opaque CGSRegionRef pointers.
+    typealias NewRegionWithRectListFn = @convention(c) (UnsafePointer<CGRect>?, Int32, UnsafeMutablePointer<OpaquePointer?>) -> Int32
+    typealias DiffRegionFn = @convention(c) (OpaquePointer, OpaquePointer, UnsafeMutablePointer<OpaquePointer?>) -> Int32
+    typealias ReleaseRegionFn = @convention(c) (OpaquePointer) -> Int32
+    typealias SetWindowEventShapeFn = @convention(c) (Int32, UInt32, OpaquePointer) -> Int32
+    static let newRegionWithRectList: NewRegionWithRectListFn? = sym("CGSNewRegionWithRectList")
+    static let diffRegion: DiffRegionFn? = sym("CGSDiffRegion")
+    static let releaseRegion: ReleaseRegionFn? = sym("CGSReleaseRegion")
+    static let setWindowEventShape: SetWindowEventShapeFn? = sym("SLSSetWindowEventShape")
     static let requestNotifications: RequestNotificationsFn? = sym("SLSRequestNotificationsForWindows")
 
     static let cid: Int32 = {
@@ -62,6 +71,36 @@ enum WindowServer {
             _ = move(tx, m.wid, m.origin)
         }
         return commit(tx, 0) == 0
+    }
+}
+
+extension WindowServer {
+    /// Limits where one of our windows takes clicks to `include` minus
+    /// `exclude`, in window coordinates with a top-left origin. Clicks
+    /// elsewhere go to the windows below. Returns false when unavailable.
+    static func setEventShape(of wid: CGWindowID, include: [CGRect], exclude: [CGRect]) -> Bool {
+        guard let newRegion = SkyLight.newRegionWithRectList,
+              let diff = SkyLight.diffRegion,
+              let release = SkyLight.releaseRegion,
+              let setShape = SkyLight.setWindowEventShape,
+              SkyLight.cid != 0 else { return false }
+        func region(_ rects: [CGRect]) -> OpaquePointer? {
+            var out: OpaquePointer?
+            let status = rects.withUnsafeBufferPointer { newRegion($0.baseAddress, Int32($0.count), &out) }
+            return status == 0 ? out : nil
+        }
+        guard let included = region(include) else { return false }
+        defer { _ = release(included) }
+        var shape = included
+        var difference: OpaquePointer?
+        if !exclude.isEmpty, let excluded = region(exclude) {
+            defer { _ = release(excluded) }
+            if diff(included, excluded, &difference) == 0, let difference {
+                shape = difference
+            }
+        }
+        defer { if let difference { _ = release(difference) } }
+        return setShape(SkyLight.cid, wid, shape) == 0
     }
 }
 

@@ -17,6 +17,9 @@
 		A1000022 /* MultiWindowTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000023; };
 		A1000024 /* SkyLight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000025; };
 		A1000026 /* ThemeCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000027; };
+		A1000028 /* WindowFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000029; };
+		A100002A /* WindowBorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100002B; };
+		B19F0A01 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = B19F0A02 /* AppIcon.icon */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +36,9 @@
 		A1000023 /* MultiWindowTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiWindowTracker.swift; sourceTree = "<group>"; };
 		A1000025 /* SkyLight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyLight.swift; sourceTree = "<group>"; };
 		A1000027 /* ThemeCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeCatalog.swift; sourceTree = "<group>"; };
+		A1000029 /* WindowFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFrame.swift; sourceTree = "<group>"; };
+		A100002B /* WindowBorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowBorder.swift; sourceTree = "<group>"; };
+		B19F0A02 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Design/Icon/AppIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -50,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000020 /* Eppie */,
+				B19F0A02 /* AppIcon.icon */,
 				A100000F /* Products */,
 			);
 			sourceTree = "<group>";
@@ -71,6 +78,8 @@
 				A1000015 /* SettingsView.swift */,
 				A1000018 /* ThemeManager.swift */,
 				A1000027 /* ThemeCatalog.swift */,
+				A1000029 /* WindowFrame.swift */,
+				A100002B /* WindowBorder.swift */,
 				A100001E /* SIPDetector.swift */,
 				A1000021 /* Injector.swift */,
 				A1000023 /* MultiWindowTracker.swift */,
@@ -139,6 +148,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B19F0A01 /* AppIcon.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -154,6 +164,8 @@
 				A1000005 /* SettingsView.swift in Sources */,
 				A1000006 /* ThemeManager.swift in Sources */,
 				A1000026 /* ThemeCatalog.swift in Sources */,
+				A1000028 /* WindowFrame.swift in Sources */,
+				A100002A /* WindowBorder.swift in Sources */,
 				A100001D /* SIPDetector.swift in Sources */,
 				A100001F /* Injector.swift in Sources */,
 				A1000022 /* MultiWindowTracker.swift in Sources */,

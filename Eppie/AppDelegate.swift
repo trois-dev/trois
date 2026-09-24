@@ -254,6 +254,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 backing: .buffered,
                 defer: false
             )
+            // Kept for reuse; closing must not free it under settingsWindow.
+            settingsWindow?.isReleasedWhenClosed = false
             settingsWindow?.title = "Trois Settings"
             settingsWindow?.contentView = NSHostingView(rootView: settingsView)
             settingsWindow?.center()

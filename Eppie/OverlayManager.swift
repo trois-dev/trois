@@ -30,6 +30,7 @@ struct WindowSnapshot {
     let minimizeButton: AXUIElement?
     let zoomButton: AXUIElement?
     let isFullScreen: Bool
+    let title: String?
 
     var buttonElements: [AXUIElement] {
         [closeButton, minimizeButton, zoomButton].compactMap { $0 }
@@ -48,8 +49,11 @@ class OverlayManager {
     private var closeOverlay: OverlayWindow?
     private var minimizeOverlay: OverlayWindow?
     private var zoomOverlay: OverlayWindow?
+    private var border: BorderWindow?
     private var currentWindow: AXUIElement?
     let targetWID: CGWindowID
+    let pid: pid_t
+    private var isActive = false
     // Target frame in global top-left coordinates, as of the last placement.
     private(set) var targetFrame: CGRect = .zero
     // Button frames relative to the target's top-left corner. Buttons stay put
@@ -64,9 +68,13 @@ class OverlayManager {
     // Called on main after each refresh() is applied, with whether the button
     // offsets changed.
     var didRefresh: ((WindowRead, Bool) -> Void)?
+    // Called on main when the border's drawn shape changes, so windows behind
+    // it can be clipped again.
+    var didChangeShape: (() -> Void)?
 
-    init(targetWID: CGWindowID) {
+    init(targetWID: CGWindowID, pid: pid_t) {
         self.targetWID = targetWID
+        self.pid = pid
     }
 
     /// Reads a window's frame and buttons. Slow; call on AXQueue.
@@ -89,10 +97,11 @@ class OverlayManager {
                 zoom: try visibleFrame(of: zoom)
             )
             let fullScreen = try value(of: window, "AXFullScreen") as? Bool ?? false
+            let title = try value(of: window, kAXTitleAttribute) as? String
             return .window(WindowSnapshot(
                 window: window, frame: frame, buttons: buttons,
                 closeButton: close, minimizeButton: minimize, zoomButton: zoom,
-                isFullScreen: fullScreen
+                isFullScreen: fullScreen, title: title
             ))
         } catch {
             return .timedOut
@@ -115,6 +124,7 @@ class OverlayManager {
             closeOverlay?.orderOut(nil)
             minimizeOverlay?.orderOut(nil)
             zoomOverlay?.orderOut(nil)
+            border?.orderOut(nil)
             return false
         case .window(let snapshot):
             // The window may have moved while AX was read. Offsets hold either
@@ -169,12 +179,18 @@ class OverlayManager {
         for (overlay, offset) in overlaysWithOffsets() where overlay.isVisible {
             moves.append((overlay, CGPoint(x: frame.minX + offset.midX, y: frame.minY + offset.midY)))
         }
-        guard !moves.isEmpty else { return }
-        let serverMoves = moves.map { (wid: CGWindowID($0.overlay.windowNumber), origin: $0.overlay.origin(centeredOn: $0.center)) }
+        let movingBorder = border?.isVisible == true ? border : nil
+        guard !moves.isEmpty || movingBorder != nil else { return }
+        var serverMoves = moves.map { (wid: CGWindowID($0.overlay.windowNumber), origin: $0.overlay.origin(centeredOn: $0.center)) }
+        if let movingBorder {
+            serverMoves.append((CGWindowID(movingBorder.windowNumber), movingBorder.origin(following: frame.origin)))
+        }
         if WindowServer.move(serverMoves) {
             for m in moves { m.overlay.didMoveOnServer(center: m.center) }
+            movingBorder?.didMoveOnServer(targetOrigin: frame.origin)
         } else {
             for m in moves { m.overlay.move(center: m.center) }
+            movingBorder?.move(targetOrigin: frame.origin)
         }
     }
 
@@ -184,6 +200,24 @@ class OverlayManager {
         closeOverlay?.clip(covering: covers)
         minimizeOverlay?.clip(covering: covers)
         zoomOverlay?.clip(covering: covers)
+        border?.clip(covering: covers)
+    }
+
+    /// What this window and its border cover, given the window's frame: the
+    /// window itself plus the parts of the border that draw. Transparent parts
+    /// of the border leave windows behind it showing.
+    func coverRects(for frame: CGRect) -> [CGRect] {
+        guard let border, border.isVisible else { return [frame] }
+        let outer = border.outerFrame
+        let dx = outer.minX + frame.minX - targetFrame.minX
+        let dy = outer.minY + frame.minY - targetFrame.minY
+        return [frame] + border.shape.map { $0.offsetBy(dx: dx, dy: dy) }
+    }
+
+    /// Whether this is the focused window, which picks the active frame.
+    func setActive(_ active: Bool) {
+        isActive = active
+        border?.setActive(active)
     }
 
     /// Brings AppKit's cached frames in line after window-server moves.
@@ -191,6 +225,7 @@ class OverlayManager {
         closeOverlay?.syncAppKitFrame()
         minimizeOverlay?.syncAppKitFrame()
         zoomOverlay?.syncAppKitFrame()
+        border?.syncAppKitFrame()
     }
 
     /// Reads only the close button and refreshes if it isn't where the overlays
@@ -316,6 +351,28 @@ class OverlayManager {
         } else {
             zoomOverlay?.orderOut(nil)
         }
+
+        updateBorder(for: snapshot)
+    }
+
+    private func updateBorder(for snapshot: WindowSnapshot) {
+        // Full-screen windows have nowhere to put a frame.
+        guard let frame = WindowFrameStore.current, !snapshot.isFullScreen else {
+            border?.close()
+            border = nil
+            return
+        }
+        if border == nil {
+            border = BorderWindow(frame: frame)
+            border?.setActive(isActive)
+            border?.shapeChanged = { [weak self] in self?.didChangeShape?() }
+        }
+        border?.setFrame(frame)
+        let target = BorderTarget(window: snapshot.window, title: snapshot.title,
+                                  close: snapshot.closeButton, minimize: snapshot.minimizeButton,
+                                  zoom: snapshot.zoomButton)
+        border?.update(target: target, pid: pid, frame: targetFrame)
+        border?.alphaValue = 1
     }
 
     /// Check if a window frame (global top-left) fills its screen, zoomed but not fullscreen
@@ -345,28 +402,42 @@ class OverlayManager {
         closeOverlay?.close()
         minimizeOverlay?.close()
         zoomOverlay?.close()
+        border?.close()
         closeOverlay = nil
         minimizeOverlay = nil
         zoomOverlay = nil
+        border = nil
     }
 
     func hideOverlays() {
         closeOverlay?.alphaValue = 0
         minimizeOverlay?.alphaValue = 0
         zoomOverlay?.alphaValue = 0
+        border?.alphaValue = 0
     }
 
     func showOverlays() {
         closeOverlay?.alphaValue = 1
         minimizeOverlay?.alphaValue = 1
         zoomOverlay?.alphaValue = 1
+        border?.alphaValue = 1
     }
 
     func reloadImages() {
         closeOverlay?.loadCustomImage()
         minimizeOverlay?.loadCustomImage()
         zoomOverlay?.loadCustomImage()
+        // The theme's frame may have come or gone; the next read sets it up.
+        refresh()
     }
+}
+
+/// `bounds` minus the union of `covered`, in one boolean operation however
+/// many rects there are. Overlapping rects are fine under the winding rule.
+func visiblePath(_ bounds: CGRect, minus covered: [CGRect]) -> CGPath {
+    let union = CGMutablePath()
+    union.addRects(covered)
+    return CGPath(rect: bounds, transform: nil).subtracting(union, using: .winding)
 }
 
 enum TrafficLightType {
@@ -662,13 +733,9 @@ class OverlayWindow: NSWindow {
         if covered.isEmpty {
             layer.mask = nil
         } else {
-            var visible = CGPath(rect: bounds, transform: nil)
-            for part in covered {
-                visible = visible.subtracting(CGPath(rect: part, transform: nil))
-            }
             let mask = CAShapeLayer()
             mask.frame = bounds
-            mask.path = visible
+            mask.path = visiblePath(bounds, minus: covered)
             layer.mask = mask
         }
         CATransaction.commit()

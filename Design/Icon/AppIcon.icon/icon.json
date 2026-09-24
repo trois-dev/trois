@@ -1,0 +1,30 @@
+{
+  "fill" : {
+    "solid" : "extended-srgb:0.11373,0.15294,0.19216,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "TroisMark.svg",
+          "name" : "TroisMark"
+        }
+      ],
+      "name" : "Circles",
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}
