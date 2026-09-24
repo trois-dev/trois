@@ -445,35 +445,51 @@ struct CatalogFramePreview: View {
         .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 
-    // Emboss is a copy one point down and right, like the website's text-shadow.
+    // Emboss and unblurred shadows are a copy offset down and right, like
+    // the website's text-shadow.
     private func titleText(_ style: CatalogFrame.Title) -> some View {
+        let font = style.style.resolvedFont
+        let alignment: Alignment = style.align == "left" ? .leading : style.align == "right" ? .trailing : .center
         func text(_ hex: String) -> some View {
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(Font(font))
                 .foregroundColor(Color(hex: hex) ?? .black)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: alignment)
         }
         return ZStack {
-            if let emboss = style.emboss {
-                text(emboss).offset(x: 1, y: 1)
+            if let shadow = style.shadow {
+                if shadow.blur > 0 {
+                    text(style.color).shadow(color: Color(hex: shadow.color) ?? .black, radius: shadow.blur / 2,
+                                             x: shadow.x, y: shadow.y)
+                } else {
+                    text(shadow.color).offset(x: shadow.x, y: shadow.y)
+                    text(style.color)
+                }
+            } else {
+                if let emboss = style.emboss {
+                    text(emboss).offset(x: 1, y: 1)
+                }
+                text(style.color)
             }
-            text(style.color)
         }
     }
 }
 
 private extension Color {
-    // "#rgb" or "#rrggbb".
+    // "#rgb", "#rrggbb" or "#rrggbbaa".
     init?(hex: String) {
         var digits = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
         if digits.count == 3 {
             digits = digits.map { "\($0)\($0)" }.joined()
         }
-        guard digits.count == 6, let value = UInt32(digits, radix: 16) else { return nil }
-        self.init(red: Double((value >> 16) & 0xff) / 255,
-                  green: Double((value >> 8) & 0xff) / 255,
-                  blue: Double(value & 0xff) / 255)
+        if digits.count == 6 { digits += "ff" }
+        guard digits.count == 8, let value = UInt32(digits, radix: 16) else { return nil }
+        self.init(.sRGB, red: Double((value >> 24) & 0xff) / 255,
+                  green: Double((value >> 16) & 0xff) / 255,
+                  blue: Double((value >> 8) & 0xff) / 255,
+                  opacity: Double(value & 0xff) / 255)
     }
 }
 
@@ -521,8 +537,10 @@ struct FrameOptionToggles: View {
     var body: some View {
         Group {
             Toggle("Show frame", isOn: $windowBorders)
+                .fixedSize()
                 .help("Draw the theme's frame around windows")
             Toggle("Frame buttons", isOn: $frameButtons)
+                .fixedSize()
                 .disabled(!windowBorders)
                 .help("Show the frame's own close, minimize and zoom buttons")
         }
@@ -601,7 +619,10 @@ struct ThemePickerView: View {
                 .fixedSize()
                 .help(ButtonArt.Sizing.allCases.map { "\($0.title): \($0.help)" }.joined(separator: "\n"))
                 Spacer()
-                FrameOptionToggles()
+                // Stacked: side by side they don't fit next to the picker.
+                VStack(alignment: .leading, spacing: 4) {
+                    FrameOptionToggles()
+                }
             }
             .padding(.horizontal)
             .padding(.vertical, 8)

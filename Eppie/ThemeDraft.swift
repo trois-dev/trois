@@ -297,6 +297,21 @@ extension ThemeManager {
         return (layout[side.rawValue] as? [[Int]] ?? []).compactMap { $0.count == 2 ? ($0[0], $0[1]) : nil }
     }
 
+    /// Sets the draft frame's title style, then applies the draft.
+    func setDraftTitleStyle(_ style: TitleStyle) {
+        guard let directory = draftFrameDirectory else { return }
+        saveLayoutBaseline()
+        guard WindowFrame.writeTitleStyle(style, in: directory) else { return }
+        saveDraft(readManifest(in: draftDirectory) ?? ThemeManifest())
+    }
+
+    /// The title style as it was when the frame came in.
+    func baselineTitleStyle() -> TitleStyle? {
+        guard let data = try? Data(contentsOf: layoutBaseline),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return TitleStyle(json: json["title"] as? [String: Any] ?? [:])
+    }
+
     // Copies the frame's layout.json aside, once per frame.
     private func saveLayoutBaseline() {
         guard !fileManager.fileExists(atPath: layoutBaseline.path), let directory = draftFrameDirectory else { return }
@@ -335,6 +350,14 @@ extension ThemeManager {
                     checks.append(DraftCheck(id: "runs-\(side.rawValue)-\(n)",
                                              message: "\(side.rawValue.capitalized) edge: \(warning)", fixes: []))
                 }
+            }
+        }
+
+        if let family = frame.titleStyle.font {
+            if !TitleStyle.isInstalled(family) {
+                checks.append(DraftCheck(id: "title-font", message: "The title font \(family) isn't installed. Titles use the system font.", fixes: []))
+            } else if !TitleStyle.isBuiltIn(family) {
+                checks.append(DraftCheck(id: "title-font", message: "The title font \(family) doesn't come with macOS. Macs without it use the system font.", fixes: []))
             }
         }
 

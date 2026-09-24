@@ -212,10 +212,32 @@ struct CatalogTheme: Decodable, Identifiable, Hashable {
 /// the top left; the image is at twice that.
 struct CatalogFrame: Decodable, Hashable {
     struct Title: Decodable, Hashable {
+        struct Shadow: Decodable, Hashable {
+            let color: String
+            let x: CGFloat
+            let y: CGFloat
+            let blur: CGFloat
+        }
+
         let box: [CGFloat]
-        // "#rgb" or "#rrggbb".
+        // "#rgb", "#rrggbb" or "#rrggbbaa".
         let color: String
         let emboss: String?
+        // The frame's title style, absent at its defaults and from older indexes.
+        let shadow: Shadow?
+        let font: String?
+        let size: CGFloat?
+        let weight: String?
+        let align: String?
+
+        var style: TitleStyle {
+            var style = TitleStyle()
+            style.font = font
+            style.size = size
+            style.weight = weight.flatMap(TitleStyle.Weight.init)
+            style.alignment = align.flatMap(TitleStyle.Alignment.init)
+            return style
+        }
     }
 
     let image: String

@@ -35,6 +35,8 @@ struct WindowFrame {
     private(set) var right: [(Int, Int)]
     // Set for 1.x schemes, which follow fixed rules instead of a layout.
     let k1: K1Parts?
+    // layout.json's "title" object.
+    private(set) var titleStyle = TitleStyle()
 
     var content: CGRect { rects[0] ?? CGRect(origin: .zero, size: size) }
 
@@ -54,6 +56,7 @@ struct WindowFrame {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let active = image("active.png") else { return nil }
         self.directory = directory
+        titleStyle = TitleStyle(json: json["title"] as? [String: Any] ?? [:])
         if json["format"] as? String == "k1" {
             guard active.width == 16, active.height == 16 else { return nil }
             self.active = active
@@ -258,6 +261,24 @@ struct WindowFrame {
         json["layout"] = layout
         guard let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return false }
         return (try? out.write(to: url, options: .atomic)) != nil
+    }
+
+    /// Sets or, when empty, removes layout.json's title style.
+    static func writeTitleStyle(_ style: TitleStyle, in directory: URL) -> Bool {
+        let url = directory.appendingPathComponent("layout.json")
+        guard let data = try? Data(contentsOf: url),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        json["title"] = style.isEmpty ? nil : style.json
+        guard let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return false }
+        return (try? out.write(to: url, options: .atomic)) != nil
+    }
+
+    /// This frame with another title style, drawn before it's written.
+    func with(titleStyle: TitleStyle) -> WindowFrame {
+        var frame = self
+        frame.titleStyle = titleStyle
+        frame.identity = UUID()
+        return frame
     }
 
     // MARK: - Layout
@@ -621,8 +642,8 @@ struct WindowFrame {
             return renderK1(k1, windowSize: windowSize, active: isActive, widgets: widgets, title: title,
                             pressedWidget: pressedWidget, cornerRadius: cornerRadius, scale: scale)
         }
-        let titleAttributes = titleAttributes(active: isActive)
-        let titleWidth = title.map { ($0 as NSString).size(withAttributes: titleAttributes).width + 8 }
+        let titleStyle = resolvedTitle(active: isActive)
+        let titleWidth = title.map { titleStyle.width(of: $0) + 8 }
         let layout = layout(windowSize: windowSize, widgets: widgets, hidden: hidden, titleWidth: titleWidth)
         let width = Int(ceil(layout.size.width * scale))
         let height = Int(ceil(layout.size.height * scale))
@@ -659,7 +680,7 @@ struct WindowFrame {
             draw(pressed, source: source, in: rect, context: context)
         }
         if let title, let rect = layout.title {
-            drawTitle(title, in: rect, attributes: titleAttributes, context: context)
+            drawTitle(title, in: rect, style: titleStyle, context: context)
         }
 
         guard let result = context.makeImage() else { return nil }
@@ -815,12 +836,15 @@ struct WindowFrame {
         return nil
     }
 
-    private func titleAttributes(active: Bool) -> [NSAttributedString.Key: Any] {
+    /// The title's look for the active or inactive window, style applied.
+    func title(active: Bool) -> ResolvedTitle {
+        k1 != nil ? k1Title(active ? self.active : inactive, active: active) : resolvedTitle(active: active)
+    }
+
+    private func resolvedTitle(active: Bool) -> ResolvedTitle {
         // Light text on dark title bars, dark on light ones.
         let light = titleBackgroundIsDark(active ? self.active : inactive)
-        let color: NSColor = light ? .white : .black
-        return [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-                .foregroundColor: active ? color : color.withAlphaComponent(0.55)]
+        return titleStyle.resolved(active: active, autoColor: light ? .white : .black, autoInactive: nil, autoShadow: nil)
     }
 
     private func titleBackgroundIsDark(_ image: CGImage) -> Bool {
@@ -835,14 +859,22 @@ struct WindowFrame {
         return luma < 128
     }
 
-    func drawTitle(_ title: String, in rect: CGRect, attributes: [NSAttributedString.Key: Any], context: CGContext) {
+    func drawTitle(_ title: String, in rect: CGRect, style: ResolvedTitle, context: CGContext) {
         let graphics = NSGraphicsContext(cgContext: context, flipped: true)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = graphics
+        if let shadow = style.shadow {
+            // Shadow offsets and blur are in device pixels, unaffected by the
+            // CTM, so scale them by hand. The CTM flips y, which turns the
+            // y-down offset into CoreGraphics' y-up one.
+            let ctm = context.ctm
+            context.setShadow(offset: CGSize(width: shadow.offset.width * ctm.a, height: shadow.offset.height * ctm.d),
+                              blur: shadow.blur * abs(ctm.a), color: shadow.color.cgColor)
+        }
         let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
+        paragraph.alignment = style.alignment.text
         paragraph.lineBreakMode = .byTruncatingMiddle
-        var attributes = attributes
+        var attributes = style.attributes
         attributes[.paragraphStyle] = paragraph
         let text = NSAttributedString(string: title, attributes: attributes)
         let height = text.size().height

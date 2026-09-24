@@ -45,6 +45,8 @@ enum EditorPart: Hashable {
     case theme
     case button(EditorButton)
     case frame
+    // The window title's font, colors and shadow.
+    case title
     // One edge list of a frame, for editing its runs.
     case edge(WindowFrame.Side)
 }
@@ -168,6 +170,11 @@ struct ThemeEditorView: View {
     @State private var pendingSave = false
     @State private var checks: [DraftCheck] = []
     @State private var showingChecks = false
+    // Edited here first, shown through previewFrame, then written once
+    // edits pause, so color wells don't rewrite the layout on every tick.
+    @State private var titleStyle = TitleStyle()
+    @State private var titleBaseline: TitleStyle?
+    @State private var titleWrite: DispatchWorkItem?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -199,6 +206,7 @@ struct ThemeEditorView: View {
             SaveThemeSheet(name: $info.name, author: $info.author) { pendingSave = true }
         }
         .onChange(of: info) { themeManager.setDraftInfo($0) }
+        .onChange(of: titleStyle) { titleChanged($0) }
         .alert(alert?.title ?? "", isPresented: Binding(
             get: { alert != nil },
             set: { if !$0 { alert = nil } }
@@ -212,6 +220,12 @@ struct ThemeEditorView: View {
     private func reload() {
         frame = themeManager.draftFrameDirectory.flatMap { WindowFrame(directory: $0) }
         previewFrame = nil
+        if titleWrite == nil {
+            titleStyle = frame?.titleStyle ?? TitleStyle()
+        } else if let frame {
+            previewFrame = frame.with(titleStyle: titleStyle)
+        }
+        titleBaseline = themeManager.baselineTitleStyle()
         info = themeManager.draftInfo()
         checks = themeManager.draftChecks()
         revision += 1
@@ -239,6 +253,10 @@ struct ThemeEditorView: View {
                     .labelStyle(.iconOnly)
                     .help("Frame")
                     .tag(EditorPart.frame)
+                Label("Title", systemImage: "textformat")
+                    .labelStyle(.iconOnly)
+                    .help("Title")
+                    .tag(EditorPart.title)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -279,6 +297,7 @@ struct ThemeEditorView: View {
         switch part {
         case .theme, .button: return PreviewState.allCases
         case .frame, .edge: return frame?.k1 == nil ? [.active, .pressed, .inactive] : [.active, .inactive]
+        case .title: return [.active, .inactive]
         }
     }
 
@@ -366,7 +385,7 @@ struct ThemeEditorView: View {
         guard canvasMode == .slices, let frame, frame.k1 == nil else { return false }
         switch selection {
         case .frame, .edge: return true
-        case .theme, .button: return false
+        case .theme, .button, .title: return false
         }
     }
 
@@ -374,7 +393,7 @@ struct ThemeEditorView: View {
         guard let frame, frame.k1 == nil else { return false }
         switch selection {
         case .frame, .edge: return true
-        case .theme, .button: return false
+        case .theme, .button, .title: return false
         }
     }
 
@@ -479,6 +498,10 @@ struct ThemeEditorView: View {
             break
         case .frame:
             if rendered != nil { rects.append(g.visible.insetBy(dx: -3, dy: -3)) }
+        case .title:
+            if let rect = rendered?.layout.title {
+                rects.append(rect.offsetBy(dx: g.outer.minX, dy: g.outer.minY).insetBy(dx: -2, dy: -2))
+            }
         case .edge(let side):
             if rendered != nil { rects.append(band(side, g).insetBy(dx: -1, dy: -1)) }
         case .button(let button):
@@ -585,6 +608,9 @@ struct ThemeEditorView: View {
                 if rect.offsetBy(dx: g.outer.minX, dy: g.outer.minY).contains(point) { return .button(button) }
             }
         }
+        if let rect = rendered?.layout.title, rect.offsetBy(dx: g.outer.minX, dy: g.outer.minY).contains(point) {
+            return .title
+        }
         if rendered != nil, g.visible.contains(point), !g.window.contains(point) {
             // Top and bottom draw over the sides, so they own the corners.
             guard frame?.k1 == nil else { return .frame }
@@ -654,7 +680,7 @@ struct ThemeEditorView: View {
         // The part may not have art for the state being previewed.
         let state = states(for: part).contains(self.state) ? self.state : .active
         switch part {
-        case .theme:
+        case .theme, .title:
             break
         case .button(let button):
             themeManager.setDraftImage(url, forKey: button.key(state.buttonSuffix))
@@ -694,6 +720,20 @@ struct ThemeEditorView: View {
         report(themeManager.setDraftEdgeRuns(runs.map { ($0[0], $0[1]) }, for: side))
     }
 
+    // MARK: - Title edits
+
+    private func titleChanged(_ style: TitleStyle) {
+        guard let frame, style != frame.titleStyle else { return }
+        previewFrame = frame.with(titleStyle: style)
+        titleWrite?.cancel()
+        let write = DispatchWorkItem {
+            titleWrite = nil
+            themeManager.setDraftTitleStyle(titleStyle)
+        }
+        titleWrite = write
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: write)
+    }
+
     private func clearUndo() {
         undoStack.removeAll()
         redoStack.removeAll()
@@ -709,6 +749,14 @@ struct ThemeEditorView: View {
             buttonInspector(button)
         case .frame:
             frameInspector
+        case .title:
+            if let frame {
+                TitleInspector(style: $titleStyle, frame: frame, baseline: titleBaseline)
+            } else {
+                Text("No window frame, so no title to style.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         case .edge(let side):
             if let frame, frame.k1 == nil {
                 EdgeInspector(side: side, frame: previewFrame ?? frame, selected: $selectedRun,
@@ -1592,6 +1640,157 @@ private struct SlicesView: View {
             return false
         }
         return true
+    }
+}
+
+// Font, colors and shadow of the window title. Leaving a field on its
+// default keeps it out of layout.json, so the frame's own look shows through.
+private struct TitleInspector: View {
+    @Binding var style: TitleStyle
+    let frame: WindowFrame
+    // The style when the frame came in, once it's been edited.
+    let baseline: TitleStyle?
+
+    // Hidden families (a leading dot) are system-only.
+    private static let families = NSFontManager.shared.availableFontFamilies.filter { !$0.hasPrefix(".") }.sorted()
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 8) {
+            GridRow {
+                Text("Font").gridColumnAlignment(.trailing)
+                HStack(spacing: 12) {
+                    Picker("Font", selection: $style.font) {
+                        Text("System").tag(String?.none)
+                        Divider()
+                        // A family the theme names but this Mac lacks still shows as picked.
+                        if let font = style.font, !Self.families.contains(font) {
+                            Text("\(font) (missing)").tag(Optional(font))
+                        }
+                        ForEach(Self.families, id: \.self) { Text($0).tag(Optional($0)) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                    Picker("Weight", selection: weight) {
+                        ForEach(TitleStyle.Weight.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    Stepper(value: size, in: TitleStyle.sizes) {
+                        Text("\(Int(size.wrappedValue)) pt").monospacedDigit()
+                    }
+                    Picker("Alignment", selection: alignment) {
+                        Label("Left", systemImage: "text.alignleft").tag(TitleStyle.Alignment.left)
+                        Label("Center", systemImage: "text.aligncenter").tag(TitleStyle.Alignment.center)
+                        Label("Right", systemImage: "text.alignright").tag(TitleStyle.Alignment.right)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelStyle(.iconOnly)
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Where the title sits in its space")
+                }
+            }
+            GridRow {
+                Text("Color")
+                HStack(spacing: 12) {
+                    colorChoice(\.color, active: true, help: "Auto picks a color that reads on the title bar art")
+                    Text("Inactive")
+                    colorChoice(\.inactiveColor, active: false, help: "Auto dims the active color")
+                    Spacer()
+                    Button("Revert") { style = baseline ?? TitleStyle() }
+                        .disabled((baseline ?? frame.titleStyle) == style)
+                        .help("Put the title back as it came with the frame")
+                }
+            }
+            GridRow {
+                Text("Shadow")
+                HStack(spacing: 12) {
+                    Picker("Shadow", selection: shadowMode) {
+                        Text("Auto").tag(0)
+                        Text("None").tag(1)
+                        Text("Custom").tag(2)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Auto keeps the frame's own emboss, if it has one")
+                    if case .custom(let shadow) = style.shadow {
+                        ColorPicker("Shadow Color", selection: Binding(
+                            get: { Color(nsColor: TitleStyle.color(shadow.color) ?? .black) },
+                            set: { color in setShadow { $0.color = TitleStyle.hex(NSColor(color)) } }))
+                            .labelsHidden()
+                        number("X", shadow.x, -4...4) { v in setShadow { $0.x = v } }
+                        number("Y", shadow.y, -4...4) { v in setShadow { $0.y = v } }
+                        number("Blur", shadow.blur, 0...6) { v in setShadow { $0.blur = v } }
+                    }
+                }
+            }
+        }
+    }
+
+    // Size, weight and alignment drop out of the style at their defaults.
+    private var size: Binding<CGFloat> {
+        Binding(get: { style.size ?? TitleStyle.defaultSize },
+                set: { style.size = $0 == TitleStyle.defaultSize ? nil : $0 })
+    }
+
+    private var weight: Binding<TitleStyle.Weight> {
+        Binding(get: { style.weight ?? TitleStyle.defaultWeight },
+                set: { style.weight = $0 == TitleStyle.defaultWeight ? nil : $0 })
+    }
+
+    private var alignment: Binding<TitleStyle.Alignment> {
+        Binding(get: { style.alignment ?? .center },
+                set: { style.alignment = $0 == .center ? nil : $0 })
+    }
+
+    // The well shows the color titles draw in, auto or not.
+    private func colorChoice(_ key: WritableKeyPath<TitleStyle, String?>, active: Bool, help: String) -> some View {
+        let drawn = frame.with(titleStyle: style).title(active: active).attributes[.foregroundColor] as? NSColor ?? .black
+        return HStack(spacing: 4) {
+            Toggle("Auto", isOn: Binding(
+                get: { style[keyPath: key] == nil },
+                set: { style[keyPath: key] = $0 ? nil : TitleStyle.hex(drawn) }))
+            ColorPicker("Color", selection: Binding(
+                get: { Color(nsColor: drawn) },
+                set: { style[keyPath: key] = TitleStyle.hex(NSColor($0)) }))
+                .labelsHidden()
+                .disabled(style[keyPath: key] == nil)
+        }
+        .help(help)
+    }
+
+    private var shadowMode: Binding<Int> {
+        Binding(get: {
+            switch style.shadow {
+            case .auto: return 0
+            case .none: return 1
+            case .custom: return 2
+            }
+        }, set: { mode in
+            switch mode {
+            case 0: style.shadow = .auto
+            case 1: style.shadow = .none
+            default:
+                // Start from the shadow the frame draws now, if any.
+                let current = frame.with(titleStyle: style).title(active: true).shadow
+                style.shadow = .custom(current.map {
+                    TitleStyle.Shadow(color: TitleStyle.hex($0.color), x: $0.offset.width, y: $0.offset.height, blur: $0.blur)
+                } ?? TitleStyle.Shadow(color: "#00000080", x: 0, y: 1, blur: 1))
+            }
+        })
+    }
+
+    private func setShadow(_ change: (inout TitleStyle.Shadow) -> Void) {
+        guard case .custom(var shadow) = style.shadow else { return }
+        change(&shadow)
+        style.shadow = .custom(shadow)
+    }
+
+    private func number(_ label: String, _ value: CGFloat, _ range: ClosedRange<CGFloat>,
+                        _ set: @escaping (CGFloat) -> Void) -> some View {
+        Stepper(value: Binding(get: { value }, set: set), in: range) {
+            Text("\(label) \(Int(value))").monospacedDigit()
+        }
     }
 }
 

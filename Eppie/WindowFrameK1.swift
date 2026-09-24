@@ -108,15 +108,21 @@ extension WindowFrame {
         let shown = isActive ? widgets.intersection(Set(parts.widgets.keys)) : []
         let widgetRects = k1WidgetRects(width: W, widgets: shown)
 
-        let attributes = k1TitleAttributes(icon, active: isActive)
-        let textWidth = title.map { ceil(($0 as NSString).size(withAttributes: attributes).width) } ?? 0
+        let titleStyle = k1Title(icon, active: isActive)
+        let textWidth = title.map { ceil(titleStyle.width(of: $0)) } ?? 0
         let stripeStart = widgetRects[.close].map { $0.minX + 13 + Self.k1WidgetGap } ?? 4 + Self.k1WidgetGap
         let stripeEnd = widgetRects.filter { $0.key != .close }.map { $0.value.minX }.min().map { $0 - Self.k1WidgetGap }
             ?? W - 4 - Self.k1WidgetGap
         var titleRect: CGRect?
         if title != nil {
             let w = min(textWidth, max(0, stripeEnd - stripeStart - 2 * Self.k1TitleGap))
-            titleRect = CGRect(x: (W - w) / 2, y: 3, width: w, height: i.top - 6)
+            let x: CGFloat
+            switch titleStyle.alignment {
+            case .left: x = stripeStart + Self.k1TitleGap
+            case .center: x = (W - w) / 2
+            case .right: x = stripeEnd - Self.k1TitleGap - w
+            }
+            titleRect = CGRect(x: x, y: 3, width: w, height: i.top - 6)
         }
 
         if isActive, let stripes = parts.stripes, stripeEnd > stripeStart {
@@ -140,12 +146,7 @@ extension WindowFrame {
         }
 
         if let title, let titleRect {
-            if let emboss = k1EmbossColor(icon) {
-                var shadow = attributes
-                shadow[.foregroundColor] = emboss
-                drawTitle(title, in: titleRect.offsetBy(dx: 1, dy: 1), attributes: shadow, context: context)
-            }
-            drawTitle(title, in: titleRect, attributes: attributes, context: context)
+            drawTitle(title, in: titleRect, style: titleStyle, context: context)
         }
 
         guard let result = context.makeImage() else { return nil }
@@ -201,9 +202,12 @@ extension WindowFrame {
         return CGColor(srgbRed: CGFloat(p[0]) / 255, green: CGFloat(p[1]) / 255, blue: CGFloat(p[2]) / 255, alpha: 1)
     }
 
-    private func k1TitleAttributes(_ icon: CGImage, active: Bool) -> [NSAttributedString.Key: Any] {
-        let color = k1Pixel(icon, x: 7, y: 3).flatMap { NSColor(cgColor: $0) } ?? .black
-        return [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: color]
+    // Each icon holds its own title color, and the emboss drawn 1 point
+    // down and right of the title.
+    func k1Title(_ icon: CGImage, active: Bool) -> ResolvedTitle {
+        func color(_ image: CGImage) -> NSColor { k1Pixel(image, x: 7, y: 3).flatMap { NSColor(cgColor: $0) } ?? .black }
+        return titleStyle.resolved(active: active, autoColor: color(self.active), autoInactive: color(inactive),
+                                   autoShadow: k1EmbossColor(icon))
     }
 
     private func k1EmbossColor(_ icon: CGImage) -> NSColor? {
