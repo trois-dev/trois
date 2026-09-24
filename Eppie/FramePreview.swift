@@ -217,9 +217,10 @@ struct WindowSurface: View {
     let size: CGSize
     let buttonRow: CGFloat
 
+    // Darker than the window in light mode, lighter in dark mode, like Mac sidebars.
     private static let sidebarColor = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor.black.withAlphaComponent(0.2)
+            ? NSColor.white.withAlphaComponent(0.08)
             : NSColor.black.withAlphaComponent(0.06)
     })
 
