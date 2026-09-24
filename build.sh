@@ -44,6 +44,14 @@ LAUNCH_SERVICES_PATH="$APP_PATH/Contents/Library/LaunchServices"
 mkdir -p "$LAUNCH_SERVICES_PATH"
 cp "$INJECTOR_DIR/com.trois.app.Injector" "$LAUNCH_SERVICES_PATH/"
 
+# Re-sign after bundling, which broke Xcode's seal. The Developer ID keeps the
+# designated requirement tied to the team, so Accessibility access survives rebuilds.
+echo "Signing..."
+codesign --force --sign "Developer ID Application: Mateo Yadarola (CL6XWJCS9R)" \
+    --entitlements "$PROJECT_DIR/Eppie/Trois.entitlements" \
+    "$APP_PATH"
+codesign --verify --strict "$APP_PATH"
+
 echo "Deploying to /Applications..."
 rm -rf "/Applications/$APP_NAME"
 cp -R "$APP_PATH" "/Applications/"
