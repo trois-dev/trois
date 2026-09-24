@@ -13,7 +13,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Buttons on every window unless the user turned it off.
-        UserDefaults.standard.register(defaults: ["allWindowsMode": true])
+        UserDefaults.standard.register(defaults: ["allWindowsMode": true, "troisEnabled": true])
+        setupMainMenu()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(reloadOverlayImages),
+            name: Notification.Name("TroisReloadImages"),
+            object: nil
+        )
 
         // Run as menu bar app (no dock icon)
         NSApp.setActivationPolicy(.accessory)
@@ -56,16 +63,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // Only terminate if user explicitly quits
-        return .terminateNow
+    // Never shown, since Trois has no Dock icon, but its key equivalents make
+    // copy, paste and close work in the Settings window.
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+        func submenu(_ title: String, _ items: [NSMenuItem]) {
+            let menu = NSMenu(title: title)
+            items.forEach(menu.addItem)
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.submenu = menu
+            mainMenu.addItem(item)
+        }
+        submenu("Trois", [NSMenuItem(title: "Quit Trois", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")])
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        submenu("Edit", [
+            NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"),
+            redo,
+            .separator(),
+            NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"),
+            NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"),
+            NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"),
+            NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        ])
+        submenu("Window", [NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")])
+        NSApp.mainMenu = mainMenu
     }
+
+    private var isEnabled: Bool { UserDefaults.standard.bool(forKey: "troisEnabled") }
 
     private func checkAndRequestPermission() {
         // Use native prompt - shows system dialog asking to open Settings
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         if AXIsProcessTrustedWithOptions(options) {
-            startTracking()
+            if isEnabled { startTracking() }
+            updateMenuState()
             return
         }
 
@@ -80,7 +112,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.permissionCheckTimer?.invalidate()
                 self?.permissionCheckTimer = nil
                 // Only start overlay tracking in overlay mode
-                if !SIPDetector.shared.sipDisabled {
+                if !SIPDetector.shared.sipDisabled, self?.isEnabled == true {
                     self?.startTracking()
                 }
                 self?.updateMenuState()
@@ -258,6 +290,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startTracking() {
+        multiWindowTracker?.stopTracking()
         let allWindowsMode = UserDefaults.standard.bool(forKey: "allWindowsMode")
 
         // All-windows mode tracks every visible window, otherwise only the focused one
@@ -266,14 +299,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         UserDefaults.standard.set(true, forKey: "troisEnabled")
         offerLoginItemOnce()
-
-        // Listen for image reload notifications
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(reloadOverlayImages),
-            name: Notification.Name("TroisReloadImages"),
-            object: nil
-        )
     }
 
     @objc private func reloadOverlayImages() {
@@ -350,7 +375,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func requestAccessibilityPermission() {
         if AXIsProcessTrusted() {
             // Only start overlay tracking in overlay mode
-            if !SIPDetector.shared.sipDisabled {
+            if !SIPDetector.shared.sipDisabled, isEnabled {
                 startTracking()
             }
             updateMenuState()
@@ -370,7 +395,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateMenuState() {
         guard let menu = statusItem.menu else { return }
         if let enabledItem = menu.item(withTitle: "Enabled") {
-            enabledItem.state = (multiWindowTracker != nil) ? .on : .off
+            let on = SIPDetector.shared.sipDisabled ? isEnabled : multiWindowTracker != nil
+            enabledItem.state = on ? .on : .off
         }
 
         // Remove accessibility item if permission granted

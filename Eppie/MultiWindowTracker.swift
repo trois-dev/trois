@@ -356,7 +356,7 @@ class MultiWindowTracker {
             buttonWatcher.unwatch(wid)
         case .window(let snapshot):
             if let pid = windowPIDs[wid] {
-                buttonWatcher.watch(wid, pid: pid, elements: snapshot.buttonElements)
+                buttonWatcher.watch(wid, pid: pid, snapshot: snapshot)
             }
         }
         // Buttons read mid-animation land somewhere in between. Read again
@@ -593,7 +593,7 @@ class MultiWindowTracker {
             overlayManagers[wid] = manager
             windowPIDs[wid] = pid
             if case .window(let snapshot) = read {
-                buttonWatcher.watch(wid, pid: pid, elements: snapshot.buttonElements)
+                buttonWatcher.watch(wid, pid: pid, snapshot: snapshot)
             }
         }
         updateSubscription()
@@ -753,12 +753,13 @@ class MultiWindowTracker {
 
 // Watches tracked windows' button elements for AXUIElementDestroyed. Some apps
 // rebuild their buttons without moving or resizing the window, which fires no
-// window-server event. Arc does it when its sidebar is shown or hidden.
+// window-server event. Arc does it when its sidebar is shown or hidden. Also
+// watches each window's title, which the frame draws.
 final class ButtonWatcher {
-    // Called on main with the window whose buttons went away.
+    // Called on main with the window whose buttons went away or whose title changed.
     var buttonsChanged: ((CGWindowID) -> Void)?
     private var observers: [pid_t: AXObserver] = [:]
-    private var watched: [CGWindowID: (pid: pid_t, elements: [AXUIElement])] = [:]
+    private var watched: [CGWindowID: (pid: pid_t, elements: [(AXUIElement, CFString)])] = [:]
 
     // AX callbacks can't capture, so they reach the live watcher through here.
     private static weak var current: ButtonWatcher?
@@ -784,20 +785,22 @@ final class ButtonWatcher {
         }
     }
 
-    /// Watches `elements` in place of whatever was watched for `wid`.
-    func watch(_ wid: CGWindowID, pid: pid_t, elements: [AXUIElement]) {
+    /// Watches the snapshot's buttons and window in place of whatever was watched for `wid`.
+    func watch(_ wid: CGWindowID, pid: pid_t, snapshot: WindowSnapshot) {
+        let elements = snapshot.buttonElements.map { ($0, kAXUIElementDestroyedNotification as CFString) }
+            + [(snapshot.window, kAXTitleChangedNotification as CFString)]
         if let old = watched[wid], old.elements.count == elements.count,
-           zip(old.elements, elements).allSatisfy({ CFEqual($0, $1) }) {
+           zip(old.elements, elements).allSatisfy({ CFEqual($0.0, $1.0) }) {
             return
         }
         unwatch(wid)
-        guard !elements.isEmpty, let observer = observer(for: pid) else { return }
+        guard !snapshot.buttonElements.isEmpty, let observer = observer(for: pid) else { return }
         watched[wid] = (pid, elements)
         let refcon = UnsafeMutableRawPointer(bitPattern: UInt(wid))
         // Adding a notification messages the app, so it can block.
         AXQueue.async {
-            for element in elements {
-                AXObserverAddNotification(observer, element, kAXUIElementDestroyedNotification as CFString, refcon)
+            for (element, notification) in elements {
+                AXObserverAddNotification(observer, element, notification, refcon)
             }
         }
     }
@@ -806,8 +809,8 @@ final class ButtonWatcher {
         guard let entry = watched.removeValue(forKey: wid) else { return }
         guard let observer = observers[entry.pid] else { return }
         AXQueue.async {
-            for element in entry.elements {
-                AXObserverRemoveNotification(observer, element, kAXUIElementDestroyedNotification as CFString)
+            for (element, notification) in entry.elements {
+                AXObserverRemoveNotification(observer, element, notification)
             }
         }
         if !watched.values.contains(where: { $0.pid == entry.pid }) {
