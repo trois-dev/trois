@@ -50,7 +50,7 @@ Trois ships without themes. Get them from the catalog:
 - In Trois: Settings > Get Themes, then Install.
 - On the web: the gallery at https://sryo.github.io/trois-themes/. Install opens Trois, which downloads the theme and applies it.
 
-The catalog lives in the `trois-themes` repo. Trois only installs themes listed there and checks each download against the catalog's SHA-256.
+The catalog lives in [sryo/trois-themes](https://github.com/sryo/trois-themes). Trois only installs themes listed there and checks each download against the catalog's SHA-256.
 
 You can also drop a theme zip or folder onto Settings > Themes, or use Install Theme. Installed themes go in `~/Library/Application Support/Trois/Themes/`.
 
@@ -82,4 +82,4 @@ Without `theme.json`, Trois guesses from file names such as `close_up`, `close_d
 
 ## License
 
-See [LICENSE](LICENSE) file.
+MIT. See [LICENSE](LICENSE). Themes are the work of their authors and are not covered by it.
