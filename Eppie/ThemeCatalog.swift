@@ -70,7 +70,17 @@ enum ThemeInstaller {
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let destination = directory.appendingPathComponent(name, isDirectory: true)
         if fileManager.fileExists(atPath: destination.path) {
-            _ = try fileManager.replaceItemAt(destination, withItemAt: root)
+            // Moved aside rather than replaced in place. On a case-insensitive
+            // volume an existing "AlphaProbe-412" would keep its casing, and the
+            // theme would no longer be found under its id.
+            let previous = staging.appendingPathComponent("previous")
+            try fileManager.moveItem(at: destination, to: previous)
+            do {
+                try fileManager.moveItem(at: root, to: destination)
+            } catch {
+                try? fileManager.moveItem(at: previous, to: destination)
+                throw error
+            }
         } else {
             try fileManager.moveItem(at: root, to: destination)
         }
