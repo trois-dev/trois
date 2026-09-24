@@ -13,8 +13,10 @@ struct ButtonFrames: Equatable {
 // first seen or its size changes, on AXQueue so a slow app can't stall motion.
 // A periodic scan picks up new and closed windows and focus changes.
 //
-// Overlays can't be ordered directly above another app's window, so they stay
-// floating and are clipped wherever a window in front of their target covers them.
+// Button overlays can't be ordered directly above another app's window, so they
+// stay floating and are clipped wherever a window in front of their target
+// covers them. Borders sit in the window stack directly below their target and
+// are put back there after raises.
 class MultiWindowTracker {
     // False follows only the focused window of the frontmost app.
     private let allWindows: Bool
@@ -25,6 +27,12 @@ class MultiWindowTracker {
     private var draggingWindows: Set<CGWindowID> = []
     private var settleWork: [CGWindowID: DispatchWorkItem] = [:]
     private var refreshWork: [CGWindowID: DispatchWorkItem] = [:]
+    private var resizeFollowUps: [CGWindowID: DispatchWorkItem] = [:]
+    private var reorderQueued = false
+    // The Dock's full-screen windows, one per display, on screen only during
+    // Mission Control and App Exposé. Their shown and hidden events hide borders.
+    private var dockWindows: Set<CGWindowID> = []
+    private var lastDockEvent: CFAbsoluteTime = 0
     private var scanTimer: Timer?
     private var scanQueued = false
     private var clippingQueued = false
@@ -55,6 +63,12 @@ class MultiWindowTracker {
     private static let settleDelay: TimeInterval = 0.1
     private static let maxFollowUpReads = 3
     private static let rejectRetry: CFAbsoluteTime = 1.0
+    // Resize events can arrive before the window server's final size.
+    private static let resizeFollowUpDelay: TimeInterval = 0.032
+    // A reorder event can come before the app finishes raising its other windows.
+    private static let reorderDelay: TimeInterval = 0.03
+    // A scan's window list can predate a Dock event, so it only corrects state after this long.
+    private static let dockEventGrace: CFAbsoluteTime = 0.5
 
     init(allWindows: Bool) {
         self.allWindows = allWindows
@@ -102,6 +116,7 @@ class MultiWindowTracker {
         RunLoop.main.add(timer, forMode: .common)
         scanTimer = timer
 
+        findDockWindows()
         scan()
     }
 
@@ -115,6 +130,8 @@ class MultiWindowTracker {
         WindowServerEvents.handler = nil
         WindowServerEvents.subscribe([])
         subscribed = []
+        dockWindows = []
+        BorderWindow.hiddenForMissionControl = false
         stack = []
         frames = [:]
         generation += 1
@@ -136,6 +153,11 @@ class MultiWindowTracker {
     }
 
     @objc private func workspaceChanged(_ notification: Notification) {
+        if notification.name == NSWorkspace.didLaunchApplicationNotification,
+           let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+           app.bundleIdentifier == "com.apple.dock" {
+            findDockWindows()
+        }
         scan()
     }
 
@@ -144,7 +166,29 @@ class MultiWindowTracker {
         for manager in overlayManagers.values {
             manager.refresh()
         }
+        findDockWindows()
         scan()
+    }
+
+    // Looks through all windows, on screen or not, so it runs off main.
+    private func findDockWindows() {
+        let generation = self.generation
+        windowListQueue.async { [weak self] in
+            let dockPIDs = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").map(\.processIdentifier))
+            let infoList = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+            var found: Set<CGWindowID> = []
+            for info in infoList {
+                guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, dockPIDs.contains(pid),
+                      info[kCGWindowLayer as String] as? Int == Int(CGWindowLevelForKey(.dockWindow)),
+                      let wid = info[kCGWindowNumber as String] as? CGWindowID else { continue }
+                found.insert(wid)
+            }
+            DispatchQueue.main.async {
+                guard let self, generation == self.generation else { return }
+                self.dockWindows = found
+                self.updateSubscription()
+            }
+        }
     }
 
     // Coalesces bursts of requests into one scan on the next run loop pass.
@@ -160,12 +204,23 @@ class MultiWindowTracker {
     // MARK: - Window-server events
 
     private func handle(event: UInt32, wid: CGWindowID) {
+        if dockWindows.contains(wid) {
+            if event == WindowServerEvents.shown || event == WindowServerEvents.hidden {
+                lastDockEvent = CFAbsoluteTimeGetCurrent()
+                BorderWindow.hiddenForMissionControl = event == WindowServerEvents.shown
+            }
+            return
+        }
         // A raise changes which windows cover which. Rebuild the stack from
         // the window list rather than guessing where the window landed.
         // Reorders fire for menus and tooltips too; only normal windows matter.
         if event == WindowServerEvents.reordered {
             if frames[wid] != nil {
+                // The raised window's border follows at once; the pass catches
+                // the rest of an app's windows raised along with it.
+                overlayManagers[wid]?.reorderBorder()
                 queueScan()
+                queueReorder()
             }
             return
         }
@@ -174,13 +229,8 @@ class MultiWindowTracker {
         case WindowServerEvents.moved:
             windowMoved(wid, manager: manager)
         case WindowServerEvents.resized:
-            if let frame = WindowServer.bounds(of: wid) {
-                frames[wid] = frame
-                if !draggingWindows.contains(wid) {
-                    manager.follow(targetFrame: frame)
-                }
-                updateClipping()
-            }
+            windowResized(wid, manager: manager)
+            scheduleResizeFollowUp(wid)
             scheduleRefresh(wid)
         case WindowServerEvents.destroyed:
             removeWindow(wid)
@@ -205,6 +255,42 @@ class MultiWindowTracker {
         // The moved window may now cover or uncover buttons of windows behind it.
         updateClipping()
         scheduleSettle(wid)
+    }
+
+    private func windowResized(_ wid: CGWindowID, manager: OverlayManager) {
+        guard let frame = WindowServer.bounds(of: wid) else { return }
+        frames[wid] = frame
+        if !draggingWindows.contains(wid) {
+            manager.resize(targetFrame: frame)
+        }
+        updateClipping()
+    }
+
+    // One more read after the last resize event, for the final size.
+    private func scheduleResizeFollowUp(_ wid: CGWindowID) {
+        resizeFollowUps[wid]?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.resizeFollowUps[wid] = nil
+            guard let manager = self.overlayManagers[wid] else { return }
+            self.windowResized(wid, manager: manager)
+        }
+        resizeFollowUps[wid] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resizeFollowUpDelay, execute: work)
+    }
+
+    // Raising a window, or an app raising all of its windows, leaves borders
+    // behind. Puts every border back below its window in one pass.
+    private func queueReorder() {
+        guard !reorderQueued else { return }
+        reorderQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.reorderDelay) { [weak self] in
+            guard let self else { return }
+            self.reorderQueued = false
+            for manager in self.overlayManagers.values {
+                manager.reorderBorder()
+            }
+        }
     }
 
     private func scheduleSettle(_ wid: CGWindowID) {
@@ -316,6 +402,7 @@ class MultiWindowTracker {
         var candidates: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
         var newStack: [CGWindowID] = []
         var newFrames: [CGWindowID: CGRect] = [:]
+        var dockShown = false
 
         for info in infoList {
             guard let wid = info[kCGWindowNumber as String] as? CGWindowID,
@@ -323,9 +410,15 @@ class MultiWindowTracker {
                   let layer = info[kCGWindowLayer as String] as? Int else {
                 continue
             }
+            if dockWindows.contains(wid) {
+                dockShown = true
+                continue
+            }
             // Skip system UI (layer != 0). Our overlays float, so this also
             // skips them, but our normal windows such as Settings are kept.
             if layer != 0 { continue }
+            // Borders share their window's level but are drawn around it, not over others.
+            if BorderWindow.isBorder(wid) { continue }
 
             guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: boundsDict) else {
@@ -359,6 +452,10 @@ class MultiWindowTracker {
 
         stack = newStack
         frames = newFrames
+        // Catches a missed Dock event.
+        if CFAbsoluteTimeGetCurrent() - lastDockEvent > Self.dockEventGrace {
+            BorderWindow.hiddenForMissionControl = dockShown
+        }
         // Windows in motion have fresher frames from their events.
         for wid in settleWork.keys {
             if let frame = WindowServer.bounds(of: wid) {
@@ -518,6 +615,8 @@ class MultiWindowTracker {
         settleWork[wid] = nil
         refreshWork[wid]?.cancel()
         refreshWork[wid] = nil
+        resizeFollowUps[wid]?.cancel()
+        resizeFollowUps[wid] = nil
         draggingWindows.remove(wid)
         buttonWatcher.unwatch(wid)
         windowPIDs[wid] = nil
@@ -525,7 +624,7 @@ class MultiWindowTracker {
     }
 
     private func updateSubscription() {
-        let wids = overlayManagers.keys.sorted()
+        let wids = Set(overlayManagers.keys).union(dockWindows).sorted()
         guard wids != subscribed else { return }
         subscribed = wids
         WindowServerEvents.subscribe(wids)

@@ -41,6 +41,55 @@ enum SkyLight {
     static let setWindowEventShape: SetWindowEventShapeFn? = sym("SLSSetWindowEventShape")
     static let requestNotifications: RequestNotificationsFn? = sym("SLSRequestNotificationsForWindows")
 
+    // Raw window-server windows, for borders that must sit in another app's window stack.
+    typealias NewWindowFn = @convention(c) (Int32, Int32, Float, Float, OpaquePointer, UnsafeMutablePointer<UInt32>) -> Int32
+    typealias WindowFn = @convention(c) (Int32, UInt32) -> Int32
+    typealias SetWindowTagsFn = @convention(c) (Int32, UInt32, UnsafeMutablePointer<UInt64>, Int32) -> Int32
+    typealias SetWindowResolutionFn = @convention(c) (Int32, UInt32, Double) -> Int32
+    typealias SetWindowOpacityFn = @convention(c) (Int32, UInt32, Bool) -> Int32
+    typealias SetWindowAlphaFn = @convention(c) (Int32, UInt32, Float) -> Int32
+    typealias SetWindowShapeFn = @convention(c) (Int32, UInt32, Float, Float, OpaquePointer) -> Int32
+    typealias WindowContextCreateFn = @convention(c) (Int32, UInt32, CFDictionary?) -> Unmanaged<CGContext>?
+    typealias FlushWindowFn = @convention(c) (Int32, UInt32, UnsafeMutableRawPointer?) -> Int32
+    typealias ConnectionFn = @convention(c) (Int32) -> Int32
+    typealias FreezeWindowFn = @convention(c) (Int32, UInt32, CFTypeRef?) -> Int32
+    typealias SetShadowPropertiesFn = @convention(c) (UInt32, CFDictionary) -> Int32
+    // (tx, wid, order, relative wid). Order 1 is above, -1 below, 0 out.
+    typealias TransactionOrderFn = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Int32
+    typealias TransactionSetLevelFn = @convention(c) (CFTypeRef, UInt32, Int32) -> Int32
+    typealias WindowQueryFn = @convention(c) (Int32, CFArray, UInt32) -> Unmanaged<CFTypeRef>?
+    typealias QueryResultCopyWindowsFn = @convention(c) (CFTypeRef) -> Unmanaged<CFTypeRef>?
+    typealias IteratorAdvanceFn = @convention(c) (CFTypeRef) -> Bool
+    typealias IteratorGetLevelFn = @convention(c) (CFTypeRef) -> Int32
+    typealias IteratorGetCornerRadiiFn = @convention(c) (CFTypeRef) -> Unmanaged<CFArray>?
+    typealias CopySpacesForWindowsFn = @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
+    typealias MoveWindowsToSpaceFn = @convention(c) (Int32, CFArray, UInt64) -> Int32
+
+    static let newWindow: NewWindowFn? = sym("SLSNewWindow")
+    static let releaseWindow: WindowFn? = sym("SLSReleaseWindow")
+    static let setWindowTags: SetWindowTagsFn? = sym("SLSSetWindowTags")
+    static let setWindowResolution: SetWindowResolutionFn? = sym("SLSSetWindowResolution")
+    static let setWindowOpacity: SetWindowOpacityFn? = sym("SLSSetWindowOpacity")
+    static let setWindowAlpha: SetWindowAlphaFn? = sym("SLSSetWindowAlpha")
+    static let setWindowShape: SetWindowShapeFn? = sym("SLSSetWindowShape")
+    static let windowContextCreate: WindowContextCreateFn? = sym("SLWindowContextCreate")
+    static let flushWindow: FlushWindowFn? = sym("SLSFlushWindowContentRegion")
+    static let disableUpdate: ConnectionFn? = sym("SLSDisableUpdate")
+    static let reenableUpdate: ConnectionFn? = sym("SLSReenableUpdate")
+    static let freezeWindow: FreezeWindowFn? = sym("SLSWindowFreezeWithOptions")
+    static let thawWindow: WindowFn? = sym("SLSWindowThaw")
+    static let setShadowProperties: SetShadowPropertiesFn? = sym("SLSWindowSetShadowProperties")
+    static let transactionOrder: TransactionOrderFn? = sym("SLSTransactionOrderWindow")
+    static let transactionSetLevel: TransactionSetLevelFn? = sym("SLSTransactionSetWindowLevel")
+    static let windowQuery: WindowQueryFn? = sym("SLSWindowQueryWindows")
+    static let queryResultCopyWindows: QueryResultCopyWindowsFn? = sym("SLSWindowQueryResultCopyWindows")
+    static let iteratorAdvance: IteratorAdvanceFn? = sym("SLSWindowIteratorAdvance")
+    static let iteratorGetLevel: IteratorGetLevelFn? = sym("SLSWindowIteratorGetLevel")
+    // macOS 26 and later.
+    static let iteratorGetCornerRadii: IteratorGetCornerRadiiFn? = sym("SLSWindowIteratorGetCornerRadii")
+    static let copySpacesForWindows: CopySpacesForWindowsFn? = sym("SLSCopySpacesForWindows")
+    static let moveWindowsToSpace: MoveWindowsToSpaceFn? = sym("SLSMoveWindowsToManagedSpace")
+
     static let cid: Int32 = {
         let fn: MainConnectionFn? = sym("SLSMainConnectionID")
         return fn?() ?? 0
@@ -56,12 +105,15 @@ enum WindowServer {
     }
 
     /// Moves our own windows in one transaction, skipping the AppKit round-trip
-    /// and keeping the overlays of one window in step with each other.
+    /// and keeping the overlays of one window in step with each other. Each
+    /// `below` entry orders a window directly under another app's window in the
+    /// same commit, so position and depth never drift apart.
     /// Returns false when SkyLight is unavailable and nothing was sent.
-    // Ordering relative to another app's window (SLSTransactionOrderWindow,
-    // SLSOrderWindow) is accepted but has no effect on macOS 27, so overlays
-    // keep a floating level instead of sitting directly above their target.
-    static func move(_ moves: [(wid: CGWindowID, origin: CGPoint)]) -> Bool {
+    // Ordering against another app's window only works for raw window-server
+    // windows at that window's level. AppKit windows ignore it, and a window at
+    // another level stays in its own band, so button overlays still float.
+    static func move(_ moves: [(wid: CGWindowID, origin: CGPoint)],
+                     below: [(wid: CGWindowID, target: CGWindowID)] = []) -> Bool {
         guard let create = SkyLight.transactionCreate,
               let move = SkyLight.transactionMove,
               let commit = SkyLight.transactionCommit,
@@ -70,7 +122,39 @@ enum WindowServer {
         for m in moves {
             _ = move(tx, m.wid, m.origin)
         }
+        if let order = SkyLight.transactionOrder {
+            for b in below {
+                _ = order(tx, b.wid, -1, b.target)
+            }
+        }
         return commit(tx, 0) == 0
+    }
+
+    /// Level and corner radius of any window, read from the window server.
+    static func info(of wid: CGWindowID) -> (level: Int32, cornerRadius: CGFloat?)? {
+        guard let query = SkyLight.windowQuery, let copy = SkyLight.queryResultCopyWindows,
+              let advance = SkyLight.iteratorAdvance, let getLevel = SkyLight.iteratorGetLevel,
+              SkyLight.cid != 0,
+              let result = query(SkyLight.cid, [NSNumber(value: wid)] as CFArray, 0)?.takeRetainedValue(),
+              let iterator = copy(result)?.takeRetainedValue(),
+              advance(iterator) else { return nil }
+        var radius: CGFloat?
+        if let radii = SkyLight.iteratorGetCornerRadii?(iterator)?.takeRetainedValue() as? [NSNumber],
+           let first = radii.first?.doubleValue, first > 0 {
+            radius = first
+        }
+        return (getLevel(iterator), radius)
+    }
+
+    /// The Space a window is on, or nil if unknown.
+    static func space(of wid: CGWindowID) -> UInt64? {
+        guard let copy = SkyLight.copySpacesForWindows, SkyLight.cid != 0,
+              let spaces = copy(SkyLight.cid, 0x7, [NSNumber(value: wid)] as CFArray)?.takeRetainedValue() as? [NSNumber] else { return nil }
+        return spaces.first?.uint64Value
+    }
+
+    static func moveToSpace(_ wid: CGWindowID, _ space: UInt64) {
+        _ = SkyLight.moveWindowsToSpace?(SkyLight.cid, [NSNumber(value: wid)] as CFArray, space)
     }
 }
 
@@ -113,6 +197,9 @@ enum WindowServerEvents {
     static let moved: UInt32 = 806
     static let resized: UInt32 = 807
     static let reordered: UInt32 = 808
+    // A watched window ordered in or out. Used for the Dock's Mission Control window.
+    static let shown: UInt32 = 815
+    static let hidden: UInt32 = 816
 
     // Called on the main thread with (event, wid).
     static var handler: ((UInt32, CGWindowID) -> Void)?
@@ -129,7 +216,7 @@ enum WindowServerEvents {
               SkyLight.requestNotifications != nil,
               SkyLight.cid != 0 else { return }
         var ok = true
-        for event in [destroyed, moved, resized, reordered] {
+        for event in [destroyed, moved, resized, reordered, shown, hidden] {
             ok = register(notifyProc, event, nil) == 0 && ok
         }
         isAvailable = ok
@@ -144,7 +231,7 @@ enum WindowServerEvents {
         }
     }
 
-    // Payload for all four events starts with the uint32 window id.
+    // Payload for all of these events starts with the uint32 window id.
     private static let notifyProc: SkyLight.NotifyProc = { event, data, length, _ in
         guard let data, length >= 4 else { return }
         let wid = CGWindowID(data.loadUnaligned(as: UInt32.self))

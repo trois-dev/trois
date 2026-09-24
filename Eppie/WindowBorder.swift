@@ -40,16 +40,18 @@ struct BorderTarget {
     }
 }
 
-// Sits above the target like the button overlays, so windows in front of the
-// target clip it. Its event shape leaves out the window's own area and
-// whatever covers the frame, so clicks there reach the windows below; a
-// transparent pixel alone does not pass a click through. Inside the shape,
-// widgets press the window's buttons and the rest drags the window.
+// A raw window-server window at its target's level, ordered directly below the
+// target, so whatever covers the target covers the frame too. AppKit windows
+// can't be ordered against another app's window, so this isn't an NSWindow.
+// Clicks still arrive through AppKit: the window server sends them to our main
+// connection tagged with this window's number, and a local monitor routes them
+// here. The event shape leaves out the window's own area and transparent parts
+// of the art, so clicks there reach the windows below. Inside it, widgets
+// press the window's buttons and the rest drags the window.
 // Widgets are only drawn when the frameButtons setting is on.
-final class BorderWindow: NSWindow {
-    private let frameView = NSView()
-    // AppKit owns the view's own layer contents, so the image goes on a sublayer.
-    private let imageLayer = CALayer()
+final class BorderWindow {
+    let windowNumber: CGWindowID
+    private let targetWID: CGWindowID
     private var windowFrame: WindowFrame
     private var target: BorderTarget?
     private var pid: pid_t = 0
@@ -59,45 +61,92 @@ final class BorderWindow: NSWindow {
     private var pressedWidget: WindowFrame.Widget?
     private var trackingWidget: WindowFrame.Widget?
     private var layout: WindowFrame.Layout?
+    private var layoutWidgets: Set<WindowFrame.Widget>?
+    // Size of the window-server shape and the context drawing into it. The
+    // context is tied to the backing store it was made for, so a new shape
+    // needs a new context.
+    private var shapeSize: CGSize = .zero
+    private var context: CGContext?
+    private var level: Int32 = 0
+    private var cornerRadius = BorderWindow.fallbackCornerRadius
+    private var closed = false
+    // Drag state: mouse and target origin at mouse down, both global top-left.
+    private var dragStart: (mouse: CGPoint, origin: CGPoint)?
+    private var pendingPosition: CGPoint?
+    private var isSettingPosition = false
     // Called when the drawn shape changes.
     var shapeChanged: (() -> Void)?
 
     /// Where the border draws, in top-left coordinates of the border window.
     var shape: [CGRect] { layout?.shape ?? [] }
-    private var layoutWidgets: Set<WindowFrame.Widget>?
-    // Covered parts currently masked out, in view coordinates.
-    private var clipRects: [CGRect]? = []
-    // Drag state: mouse and target origin at mouse down, both global top-left.
-    private var dragStart: (mouse: CGPoint, origin: CGPoint)?
-    private var pendingPosition: CGPoint?
-    private var isSettingPosition = false
-    // Set after a window-server move AppKit didn't see.
-    private var appKitStale = false
-    // Smallest corner rounding of standard windows; toolbar windows round
-    // more, so a sliver of their corners may still show through.
-    private static let cornerRadius: CGFloat = {
+    private(set) var isVisible = false
+
+    var alphaValue: CGFloat = 1 {
+        didSet {
+            guard alphaValue != oldValue else { return }
+            applyAlpha()
+        }
+    }
+
+    /// Hides every border while Mission Control or App Exposé shows. AppKit
+    /// hides its own transient windows then, but not raw window-server ones.
+    static var hiddenForMissionControl = false {
+        didSet {
+            guard hiddenForMissionControl != oldValue else { return }
+            for entry in borders.values {
+                entry.border?.applyAlpha()
+            }
+        }
+    }
+
+    private func applyAlpha() {
+        guard !closed else { return }
+        let alpha = Self.hiddenForMissionControl ? 0 : alphaValue
+        _ = SkyLight.setWindowAlpha?(SkyLight.cid, windowNumber, Float(alpha))
+    }
+
+    // Used where the window server doesn't report a radius, before macOS 26.
+    private static let fallbackCornerRadius: CGFloat = {
         if #available(macOS 26, *) { return 16 }
         return 10
     }()
+    // Art is drawn at 2x whatever the display, like the window's backing store.
+    private static let scale: CGFloat = 2
 
-    init(frame windowFrame: WindowFrame) {
+    /// Nil when SkyLight can't make the window.
+    init?(frame windowFrame: WindowFrame, targetWID: CGWindowID) {
+        let cid = SkyLight.cid
+        guard cid != 0,
+              let newWindow = SkyLight.newWindow,
+              let newRegion = SkyLight.newRegionWithRectList,
+              let releaseRegion = SkyLight.releaseRegion,
+              SkyLight.windowContextCreate != nil,
+              SkyLight.transactionOrder != nil else { return nil }
+        var rect = CGRect(x: 0, y: 0, width: 1, height: 1)
+        var region: OpaquePointer?
+        guard newRegion(&rect, 1, &region) == 0, let region else { return nil }
+        defer { _ = releaseRegion(region) }
+        var wid: UInt32 = 0
+        guard newWindow(cid, Int32(CGWindowBackingType.backingStoreBuffered.rawValue), -9999, -9999, region, &wid) == 0,
+              wid != 0 else { return nil }
+        windowNumber = wid
+        self.targetWID = targetWID
         self.windowFrame = windowFrame
-        super.init(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
-        level = .floating
-        isReleasedWhenClosed = false
-        animationBehavior = .none
-        backgroundColor = .clear
-        isOpaque = false
-        hasShadow = false
-        collectionBehavior = [.canJoinAllSpaces, .stationary]
-        // Until an event shape is set, clicks must fall through.
-        ignoresMouseEvents = true
-        frameView.wantsLayer = true
-        imageLayer.magnificationFilter = .nearest
-        imageLayer.minificationFilter = .nearest
-        imageLayer.anchorPoint = .zero
-        frameView.layer?.addSublayer(imageLayer)
-        contentView = frameView
+
+        // Bit 16 is what a non-activating panel sets: a click on the frame
+        // leaves Trois in the background, so the focused window stays active.
+        var tags: UInt64 = 1 << 16
+        _ = SkyLight.setWindowTags?(cid, wid, &tags, 64)
+        _ = SkyLight.setWindowResolution?(cid, wid, Self.scale)
+        // Not opaque, so transparent pixels show what's behind.
+        _ = SkyLight.setWindowOpacity?(cid, wid, false)
+        _ = SkyLight.setShadowProperties?(wid, ["com.apple.WindowShadowDensity": 0] as CFDictionary)
+        Self.register(self)
+        if Self.hiddenForMissionControl { applyAlpha() }
+    }
+
+    deinit {
+        close()
     }
 
     /// Frame inset around a target, in global top-left coordinates.
@@ -110,7 +159,6 @@ final class BorderWindow: NSWindow {
     func setFrame(_ frame: WindowFrame) {
         guard frame.directory != windowFrame.directory else { return }
         windowFrame = frame
-        clipRects = nil
         redraw()
         place()
     }
@@ -123,11 +171,22 @@ final class BorderWindow: NSWindow {
         self.target = target
         self.pid = pid
         targetFrame = frame
-        if resized || retitled || layout == nil {
+        let restyled = readTargetInfo()
+        if resized || retitled || restyled || layout == nil {
             redraw()
         }
         place()
-        orderFront(nil)
+    }
+
+    /// Follows a size change, redrawing at the new size in the same screen update.
+    func resize(to frame: CGRect) {
+        let resized = frame.size != targetFrame.size
+        targetFrame = frame
+        if resized {
+            redraw()
+        } else {
+            place()
+        }
     }
 
     func setActive(_ active: Bool) {
@@ -145,51 +204,117 @@ final class BorderWindow: NSWindow {
     /// Records a move the window server already applied.
     func didMoveOnServer(targetOrigin: CGPoint) {
         targetFrame.origin = targetOrigin
-        appKitStale = true
     }
 
-    /// AppKit fallback when SkyLight transactions are unavailable.
+    /// Fallback when the batched move couldn't be sent.
     func move(targetOrigin: CGPoint) {
         targetFrame.origin = targetOrigin
         place()
     }
 
-    func syncAppKitFrame() {
-        guard appKitStale else { return }
-        place()
+    /// Puts the border back directly below its target, e.g. after an app
+    /// raised its windows and left it behind.
+    func reorder() {
+        guard isVisible, !closed else { return }
+        commit { tx, order in _ = order(tx, self.windowNumber, -1, self.targetWID) }
     }
 
+    func orderOut() {
+        guard isVisible, !closed else { return }
+        isVisible = false
+        commit { tx, order in _ = order(tx, self.windowNumber, 0, 0) }
+    }
+
+    func close() {
+        guard !closed else { return }
+        closed = true
+        isVisible = false
+        context = nil
+        Self.unregister(windowNumber)
+        _ = SkyLight.releaseWindow?(SkyLight.cid, windowNumber)
+    }
+
+    // Level, corner radius and Space follow the target. Returns true when the
+    // art needs redrawing.
+    private func readTargetInfo() -> Bool {
+        var restyled = false
+        if let info = WindowServer.info(of: targetWID) {
+            level = info.level
+            let radius = info.cornerRadius ?? Self.fallbackCornerRadius
+            restyled = radius != cornerRadius
+            cornerRadius = radius
+        }
+        if let space = WindowServer.space(of: targetWID), space != WindowServer.space(of: windowNumber) {
+            WindowServer.moveToSpace(windowNumber, space)
+        }
+        return restyled
+    }
+
+    private func commit(_ build: (CFTypeRef, SkyLight.TransactionOrderFn) -> Void) {
+        guard let create = SkyLight.transactionCreate, let commit = SkyLight.transactionCommit,
+              let order = SkyLight.transactionOrder,
+              let tx = create(SkyLight.cid)?.takeRetainedValue() else { return }
+        build(tx, order)
+        _ = commit(tx, 0)
+    }
+
+    // Moves the border around the target and orders it directly below, in one commit.
     private func place() {
-        appKitStale = false
-        guard let primary = NSScreen.screens.first else { return }
-        let outer = outerFrame
-        // Global top-left to AppKit bottom-left.
-        setFrame(NSRect(x: outer.minX, y: primary.frame.height - outer.maxY,
-                        width: outer.width, height: outer.height), display: false)
-        updateEventShape()
+        guard !closed, layout != nil else { return }
+        let origin = outerFrame.origin
+        commit { tx, order in
+            _ = SkyLight.transactionSetLevel?(tx, windowNumber, level)
+            _ = SkyLight.transactionMove?(tx, windowNumber, origin)
+            _ = order(tx, windowNumber, -1, targetWID)
+        }
+        isVisible = true
     }
 
     private func redraw() {
-        guard targetFrame.width > 0, targetFrame.height > 0 else { return }
-        let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        guard !closed, targetFrame.width > 0, targetFrame.height > 0 else { return }
         guard let (image, layout) = windowFrame.render(
             windowSize: targetFrame.size, active: isActive, widgets: target?.widgets ?? [],
             title: target?.title, pressedWidget: pressedWidget,
-            cornerRadius: Self.cornerRadius, scale: scale
+            cornerRadius: cornerRadius, scale: Self.scale
         ) else { return }
         let oldShape = self.layout?.shape
         self.layout = layout
         layoutWidgets = target?.widgets
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        imageLayer.contents = image
-        imageLayer.contentsScale = scale
-        imageLayer.frame = CGRect(origin: .zero, size: layout.size)
-        CATransaction.commit()
-        if frame.size != layout.size {
-            clipRects = nil
+        let cid = SkyLight.cid
+        let reshape = layout.size != shapeSize
+
+        // The context draws straight into the backing store, and a screen update
+        // can land mid-draw, e.g. while a click raises a window. Freezing keeps
+        // the old art on screen until the new art is flushed. A new size also
+        // changes the shape and position, so screen updates are held too, making
+        // all three appear together.
+        if reshape {
+            _ = SkyLight.disableUpdate?(cid)
+        }
+        _ = SkyLight.freezeWindow?(cid, windowNumber, nil)
+        if reshape {
+            setShape(layout.size)
+        }
+        if context == nil {
+            context = SkyLight.windowContextCreate?(cid, windowNumber, nil)?.takeRetainedValue()
+            context?.interpolationQuality = .none
+        }
+        if let context {
+            // Copy replaces every pixel, transparent ones included, so no clear is needed.
+            context.setBlendMode(.copy)
+            context.draw(image, in: CGRect(origin: .zero, size: layout.size))
+            context.flush()
+            _ = SkyLight.flushWindow?(cid, windowNumber, nil)
+        }
+        // A hidden border keeps its new shape off screen until placed.
+        if reshape && isVisible {
             place()
-        } else if oldShape != layout.shape {
+        }
+        _ = SkyLight.thawWindow?(cid, windowNumber)
+        if reshape {
+            _ = SkyLight.reenableUpdate?(cid)
+        }
+        if reshape || oldShape != layout.shape {
             updateEventShape()
         }
         if oldShape != layout.shape {
@@ -197,63 +322,69 @@ final class BorderWindow: NSWindow {
         }
     }
 
-    /// Masks out the parts covered by `covers` (global top-left frames).
-    func clip(covering covers: [CGRect]) {
-        let outer = outerFrame
-        let bounds = CGRect(origin: .zero, size: outer.size)
-        let covered: [CGRect] = covers.compactMap { cover in
-            let part = cover.intersection(outer)
-            guard !part.isNull, !part.isEmpty else { return nil }
-            return CGRect(x: part.minX - outer.minX, y: outer.maxY - part.maxY, width: part.width, height: part.height)
-        }
-        guard covered != clipRects else { return }
-        let layer = imageLayer
-        clipRects = covered
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        if covered.isEmpty {
-            layer.mask = nil
-        } else {
-            let mask = CAShapeLayer()
-            mask.frame = bounds
-            mask.path = visiblePath(bounds, minus: covered)
-            layer.mask = mask
-        }
-        CATransaction.commit()
-        updateEventShape()
+    private func setShape(_ size: CGSize) {
+        guard let newRegion = SkyLight.newRegionWithRectList, let release = SkyLight.releaseRegion,
+              let setShape = SkyLight.setWindowShape else { return }
+        var rect = CGRect(origin: .zero, size: size)
+        var region: OpaquePointer?
+        guard newRegion(&rect, 1, &region) == 0, let region else { return }
+        defer { _ = release(region) }
+        let origin = outerFrame.origin
+        _ = setShape(SkyLight.cid, windowNumber, Float(origin.x), Float(origin.y), region)
+        shapeSize = size
+        context = nil
     }
 
     private func updateEventShape() {
-        let outer = outerFrame
-        let bounds = CGRect(origin: .zero, size: outer.size)
         let i = windowFrame.insets
         let hole = CGRect(x: i.left, y: i.top, width: targetFrame.width, height: targetFrame.height)
-        // Clip rects are bottom-left; the event shape is top-left.
-        let covered = (clipRects ?? []).map { CGRect(x: $0.minX, y: bounds.height - $0.maxY, width: $0.width, height: $0.height) }
-        if covered.contains(where: { $0.contains(bounds) }) {
-            ignoresMouseEvents = true
-            return
-        }
         // Only drawn parts take clicks; transparent ones pass them through.
-        let drawn = shape
-        guard !drawn.isEmpty else {
-            ignoresMouseEvents = true
-            return
-        }
-        // Toggling ignoresMouseEvents can reset the shape, so it goes first.
-        // Without a shape the whole window would take clicks, so it takes none.
-        ignoresMouseEvents = false
-        if !WindowServer.setEventShape(of: CGWindowID(windowNumber), include: drawn, exclude: [hole] + covered) {
-            ignoresMouseEvents = true
-        }
+        // An empty shape takes none.
+        _ = WindowServer.setEventShape(of: windowNumber, include: shape, exclude: [hole])
     }
 
     // MARK: - Mouse
 
+    private struct Weak {
+        weak var border: BorderWindow?
+    }
+    private static var borders: [CGWindowID: Weak] = [:]
+    private static var monitor: Any?
+
+    /// Whether `wid` is one of our border windows.
+    static func isBorder(_ wid: CGWindowID) -> Bool {
+        borders[wid] != nil
+    }
+
+    private static func register(_ border: BorderWindow) {
+        borders[border.windowNumber] = Weak(border: border)
+        guard monitor == nil else { return }
+        // AppKit knows no window for these events, so they'd be dropped after the monitor.
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { event in
+            guard let border = borders[CGWindowID(event.windowNumber)]?.border else { return event }
+            border.handle(event)
+            return nil
+        }
+    }
+
+    private static func unregister(_ wid: CGWindowID) {
+        borders[wid] = nil
+    }
+
+    private func handle(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown: mouseDown(with: event)
+        case .leftMouseDragged: mouseDragged(with: event)
+        case .leftMouseUp: mouseUp(with: event)
+        default: break
+        }
+    }
+
     /// Event location in layout coordinates (top-left origin).
     private func layoutPoint(_ event: NSEvent) -> CGPoint {
-        let p = event.locationInWindow
-        return CGPoint(x: p.x, y: frame.height - p.y)
+        let p = event.cgEvent?.location ?? Self.mouseLocation()
+        let outer = outerFrame
+        return CGPoint(x: p.x - outer.minX, y: p.y - outer.minY)
     }
 
     private func widget(at point: CGPoint) -> WindowFrame.Widget? {
@@ -266,7 +397,7 @@ final class BorderWindow: NSWindow {
         return CGPoint(x: m.x, y: height - m.y)
     }
 
-    override func mouseDown(with event: NSEvent) {
+    private func mouseDown(with event: NSEvent) {
         raiseTarget()
         if let widget = widget(at: layoutPoint(event)) {
             trackingWidget = widget
@@ -279,7 +410,7 @@ final class BorderWindow: NSWindow {
         }
     }
 
-    override func mouseDragged(with event: NSEvent) {
+    private func mouseDragged(with event: NSEvent) {
         if let trackingWidget {
             let inside = widget(at: layoutPoint(event)) == trackingWidget
             setPressed(inside ? trackingWidget : nil)
@@ -291,7 +422,7 @@ final class BorderWindow: NSWindow {
                                   y: dragStart.origin.y + mouse.y - dragStart.mouse.y))
     }
 
-    override func mouseUp(with event: NSEvent) {
+    private func mouseUp(with event: NSEvent) {
         if let trackingWidget, pressedWidget == trackingWidget {
             press(trackingWidget)
         }

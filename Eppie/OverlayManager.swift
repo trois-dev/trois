@@ -124,7 +124,7 @@ class OverlayManager {
             closeOverlay?.orderOut(nil)
             minimizeOverlay?.orderOut(nil)
             zoomOverlay?.orderOut(nil)
-            border?.orderOut(nil)
+            border?.orderOut()
             return false
         case .window(let snapshot):
             // The window may have moved while AX was read. Offsets hold either
@@ -173,19 +173,21 @@ class OverlayManager {
 
     /// Moves the overlays with the target using cached offsets, in one
     /// window-server transaction.
-    func follow(targetFrame frame: CGRect) {
+    func follow(targetFrame frame: CGRect, includingBorder: Bool = true) {
         targetFrame.origin = frame.origin
         var moves: [(overlay: OverlayWindow, center: CGPoint)] = []
         for (overlay, offset) in overlaysWithOffsets() where overlay.isVisible {
             moves.append((overlay, CGPoint(x: frame.minX + offset.midX, y: frame.minY + offset.midY)))
         }
-        let movingBorder = border?.isVisible == true ? border : nil
+        let movingBorder = includingBorder && border?.isVisible == true ? border : nil
         guard !moves.isEmpty || movingBorder != nil else { return }
         var serverMoves = moves.map { (wid: CGWindowID($0.overlay.windowNumber), origin: $0.overlay.origin(centeredOn: $0.center)) }
+        var below: [(wid: CGWindowID, target: CGWindowID)] = []
         if let movingBorder {
-            serverMoves.append((CGWindowID(movingBorder.windowNumber), movingBorder.origin(following: frame.origin)))
+            serverMoves.append((movingBorder.windowNumber, movingBorder.origin(following: frame.origin)))
+            below.append((movingBorder.windowNumber, targetWID))
         }
-        if WindowServer.move(serverMoves) {
+        if WindowServer.move(serverMoves, below: below) {
             for m in moves { m.overlay.didMoveOnServer(center: m.center) }
             movingBorder?.didMoveOnServer(targetOrigin: frame.origin)
         } else {
@@ -194,13 +196,25 @@ class OverlayManager {
         }
     }
 
+    /// Follows a live resize: overlays move with the top-left corner and the
+    /// border redraws at the new size, both without an AX read.
+    func resize(targetFrame frame: CGRect) {
+        follow(targetFrame: frame, includingBorder: false)
+        border?.resize(to: frame)
+    }
+
+    /// Puts the border back directly below the target.
+    func reorderBorder() {
+        border?.reorder()
+    }
+
     /// Clips each overlay to the part not covered by `covers`, the frames of
-    /// windows in front of the target in global top-left coordinates.
+    /// windows in front of the target in global top-left coordinates. The
+    /// border sits in the window stack, so it needs no clipping.
     func clip(covering covers: [CGRect]) {
         closeOverlay?.clip(covering: covers)
         minimizeOverlay?.clip(covering: covers)
         zoomOverlay?.clip(covering: covers)
-        border?.clip(covering: covers)
     }
 
     /// What this window and its border cover, given the window's frame: the
@@ -225,7 +239,6 @@ class OverlayManager {
         closeOverlay?.syncAppKitFrame()
         minimizeOverlay?.syncAppKitFrame()
         zoomOverlay?.syncAppKitFrame()
-        border?.syncAppKitFrame()
     }
 
     /// Reads only the close button and refreshes if it isn't where the overlays
@@ -363,7 +376,7 @@ class OverlayManager {
             return
         }
         if border == nil {
-            border = BorderWindow(frame: frame)
+            border = BorderWindow(frame: frame, targetWID: targetWID)
             border?.setActive(isActive)
             border?.shapeChanged = { [weak self] in self?.didChangeShape?() }
         }
@@ -487,7 +500,8 @@ class OverlayWindow: NSWindow {
         self.isOpaque = false
         self.hasShadow = false
         self.ignoresMouseEvents = false
-        self.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        // Transient hides it for Mission Control and Exposé, where the window it covers shrinks away.
+        self.collectionBehavior = [.canJoinAllSpaces, .transient]
 
         setupImageView()
         setupTracking()
