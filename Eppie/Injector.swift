@@ -7,177 +7,139 @@ class Injector: NSObject {
 
     private let loaderBundleName = "TroisLoader.bundle"
     private let helperName = "com.trois.app.Injector"
+    private let installDir = "/Library/PrivilegedHelperTools"
 
-    private var loaderPath: String?
-    private var helperPath: String?
+    // Bundled copies. The helper only loads the root-owned installed loader.
+    private var bundledLoader: URL?
+    private var bundledHelper: URL?
+
+    private var installedHelper: URL { URL(fileURLWithPath: installDir).appendingPathComponent(helperName) }
+    private var installedLoader: URL { URL(fileURLWithPath: installDir).appendingPathComponent(loaderBundleName) }
+
+    // Apps launched close together share one admin prompt.
+    private var pendingApps: [NSRunningApplication] = []
+    private var flushScheduled = false
+    private let queue = DispatchQueue(label: "com.trois.app.injector")
 
     private override init() {
         super.init()
-        setupPaths()
+        let resources = Bundle.main.resourceURL?.appendingPathComponent(loaderBundleName)
+        if let resources, FileManager.default.fileExists(atPath: resources.appendingPathComponent("Contents/MacOS/TroisLoader").path) {
+            bundledLoader = resources
+        }
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchServices/\(helperName)")
+        if FileManager.default.fileExists(atPath: helper.path) {
+            bundledHelper = helper
+        }
     }
 
-    private func setupPaths() {
-        // Look for loader and helper in app's bundle
-        // Use the dylib inside the bundle, not the bundle itself
-        if let bundlePath = Bundle.main.resourcePath {
-            let loaderBundleURL = URL(fileURLWithPath: bundlePath).appendingPathComponent(loaderBundleName)
-            let dylibURL = loaderBundleURL.appendingPathComponent("Contents/MacOS/TroisLoader")
-            if FileManager.default.fileExists(atPath: dylibURL.path) {
-                loaderPath = dylibURL.path
-            }
-        }
-
-        // Helper is in Contents/Library/LaunchServices
-        if let bundlePath = Bundle.main.bundlePath as String? {
-            let helperURL = URL(fileURLWithPath: bundlePath)
-                .appendingPathComponent("Contents/Library/LaunchServices")
-                .appendingPathComponent(helperName)
-            if FileManager.default.fileExists(atPath: helperURL.path) {
-                helperPath = helperURL.path
-            }
-        }
-
-        // Fallback: check system location
-        if helperPath == nil {
-            let systemHelper = "/Library/PrivilegedHelperTools/\(helperName)"
-            if FileManager.default.fileExists(atPath: systemHelper) {
-                helperPath = systemHelper
-            }
-        }
-
-        // Fallback to Application Support for loader
-        if loaderPath == nil {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            let troisSupport = appSupport.appendingPathComponent("Trois")
-            let loaderBundleURL = troisSupport.appendingPathComponent(loaderBundleName)
-            let dylibURL = loaderBundleURL.appendingPathComponent("Contents/MacOS/TroisLoader")
-            if FileManager.default.fileExists(atPath: dylibURL.path) {
-                loaderPath = dylibURL.path
-            }
-        }
-
-        print("Trois Injector: loader=\(loaderPath ?? "not found"), helper=\(helperPath ?? "not found")")
-    }
-
+    // The shellcode and the helper build are arm64 only.
     func canInject() -> Bool {
-        return SIPDetector.shared.sipDisabled && loaderPath != nil && helperPath != nil
-    }
-
-    // Check if helper is installed in system location
-    func isHelperInstalled() -> Bool {
-        return FileManager.default.fileExists(atPath: "/Library/PrivilegedHelperTools/\(helperName)")
-    }
-
-    // Install the helper to system location
-    func installHelper() -> Bool {
-        guard let helper = helperPath else {
-            print("Trois: Helper not found in bundle")
-            return false
-        }
-
-        let script = """
-        do shell script "mkdir -p /Library/PrivilegedHelperTools && cp '\(helper)' /Library/PrivilegedHelperTools/\(helperName) && chmod 755 /Library/PrivilegedHelperTools/\(helperName)" with administrator privileges
-        """
-
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            scriptObject.executeAndReturnError(&error)
-            if error != nil {
-                print("Trois: Failed to install helper: \(error ?? [:])")
-                return false
-            }
-            print("Trois: Helper installed successfully")
-            return true
-        }
+        #if arch(arm64)
+        return SIPDetector.shared.sipDisabled && bundledLoader != nil && bundledHelper != nil
+        #else
         return false
+        #endif
     }
 
-    // Inject into all running GUI apps using privileged helper
+    // True when the installed helper and loader match the ones in this app.
+    private func isInstallCurrent() -> Bool {
+        guard let bundledHelper, let bundledLoader else { return false }
+        let fm = FileManager.default
+        let loaderBinary = "Contents/MacOS/TroisLoader"
+        return fm.contentsEqual(atPath: bundledHelper.path, andPath: installedHelper.path)
+            && fm.contentsEqual(atPath: bundledLoader.appendingPathComponent(loaderBinary).path,
+                                andPath: installedLoader.appendingPathComponent(loaderBinary).path)
+    }
+
+    // Quotes text for an AppleScript string literal, then for the shell via quoted form.
+    private func shellArg(_ text: String) -> String {
+        let escaped = text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        return "(quoted form of \"\(escaped)\")"
+    }
+
+    // Runs a shell command as root. parts are joined with spaces; each is already an AppleScript expression.
+    private func runAsAdmin(_ parts: [String]) -> Bool {
+        let script = "do shell script " + parts.joined(separator: " & \" \" & ") + " with administrator privileges"
+        var error: NSDictionary?
+        // NSAppleScript is only safe on the main thread.
+        let ok = DispatchQueue.main.sync {
+            NSAppleScript(source: script)?.executeAndReturnError(&error) != nil
+        }
+        if let error { print("Trois: Admin command failed: \(error)") }
+        return ok
+    }
+
+    // Helper and loader are installed root-owned so no user process can swap what root loads.
+    private func installCommand() -> [String]? {
+        guard let bundledHelper, let bundledLoader else { return nil }
+        let script = """
+        set -e; d=\(installDir); mkdir -p "$d"; \
+        rm -rf "$d/\(loaderBundleName)"; cp -R "$1" "$d/\(loaderBundleName)"; \
+        cp "$2" "$d/\(helperName)"; \
+        chown -R root:wheel "$d/\(helperName)" "$d/\(loaderBundleName)"; \
+        chmod 755 "$d/\(helperName)"; chmod -R go-w "$d/\(loaderBundleName)"
+        """
+        return ["\"/bin/sh -c \"", shellArg(script), "\"trois-install\"", shellArg(bundledLoader.path), shellArg(bundledHelper.path)]
+    }
+
+    // Start time in microseconds, which the helper checks so a reused pid is never injected.
+    private func startTime(of pid: pid_t) -> Int64? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let start = info.kp_proc.p_un.__p_starttime
+        return Int64(start.tv_sec) * 1_000_000 + Int64(start.tv_usec)
+    }
+
+    private func isInjectable(_ app: NSRunningApplication) -> Bool {
+        app.activationPolicy == .regular
+            && app.bundleIdentifier != nil
+            && app.bundleIdentifier != Bundle.main.bundleIdentifier
+            && app.executableArchitecture == NSBundleExecutableArchitectureARM64
+    }
+
+    // Inject into all running GUI apps
     func injectAll() {
-        guard canInject() else {
-            print("Trois: Cannot inject (SIP enabled or tools missing)")
-            return
-        }
+        enqueue(NSWorkspace.shared.runningApplications)
+    }
 
-        guard let loader = loaderPath else {
-            print("Trois: Loader not found")
-            return
-        }
+    // Inject into a newly launched app
+    func inject(into app: NSRunningApplication) {
+        enqueue([app])
+    }
 
-        // Install helper if needed
-        if !isHelperInstalled() {
-            print("Trois: Installing helper...")
-            if !installHelper() {
-                print("Trois: Failed to install helper")
-                return
-            }
-        }
-
-        let apps = NSWorkspace.shared.runningApplications.filter { app in
-            app.activationPolicy == .regular &&
-            app.bundleIdentifier != Bundle.main.bundleIdentifier &&
-            app.bundleIdentifier != nil
-        }
-
-        print("Trois: Injecting into \(apps.count) apps...")
-
-        // Build injection commands for all apps
-        var commands: [String] = []
-        for app in apps {
-            let pid = app.processIdentifier
-            let name = app.localizedName ?? "Unknown"
-            print("Trois: Will inject into \(name) (pid \(pid))")
-            commands.append("/Library/PrivilegedHelperTools/\(helperName) \(pid) '\(loader)'")
-        }
-
-        if commands.isEmpty {
-            return
-        }
-
-        // Run all injections with a single admin prompt
-        let combinedCommand = commands.joined(separator: "; ")
-        let script = """
-        do shell script "\(combinedCommand)" with administrator privileges
-        """
-
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            scriptObject.executeAndReturnError(&error)
-            if let err = error {
-                print("Trois: Injection error: \(err)")
-            } else {
-                print("Trois: Injection complete")
-            }
+    private func enqueue(_ apps: [NSRunningApplication]) {
+        guard canInject() else { return }
+        pendingApps.append(contentsOf: apps.filter(isInjectable))
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.flush()
         }
     }
 
-    // Inject into a single process
-    func inject(into pid: pid_t) -> Bool {
-        guard let loader = loaderPath else {
-            print("Trois: Loader not found")
-            return false
+    private func flush() {
+        flushScheduled = false
+        let apps = pendingApps.filter { !$0.isTerminated }
+        pendingApps.removeAll()
+        let targets = apps.compactMap { app in
+            startTime(of: app.processIdentifier).map { "\(app.processIdentifier):\($0)" }
         }
+        guard !targets.isEmpty, let install = installCommand() else { return }
 
-        if !isHelperInstalled() {
-            if !installHelper() {
-                return false
+        queue.async { [self] in
+            var parts: [String] = []
+            if !isInstallCurrent() {
+                parts = install + ["\"&&\""]
+            }
+            parts += [shellArg(installedHelper.path)] + targets.map { shellArg($0) }
+            print("Trois: Injecting into \(targets.count) apps")
+            if !runAsAdmin(parts) {
+                print("Trois: Some injections failed")
             }
         }
-
-        let script = """
-        do shell script "/Library/PrivilegedHelperTools/\(helperName) \(pid) '\(loader)'" with administrator privileges
-        """
-
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            scriptObject.executeAndReturnError(&error)
-            if error != nil {
-                print("Trois: Injection error: \(error ?? [:])")
-                return false
-            }
-            return true
-        }
-        return false
     }
 
     // Notify all injected apps to reload themes
@@ -188,13 +150,5 @@ class Injector: NSObject {
             userInfo: nil,
             deliverImmediately: true
         )
-    }
-
-    // Get list of running GUI apps
-    func getInjectableApps() -> [NSRunningApplication] {
-        return NSWorkspace.shared.runningApplications.filter { app in
-            app.activationPolicy == .regular &&
-            app.bundleIdentifier != Bundle.main.bundleIdentifier
-        }
     }
 }

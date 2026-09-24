@@ -15,7 +15,6 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <mach/mach_vm.h>
-#include <dispatch/dispatch.h>
 #include <os/lock.h>
 
 
@@ -31,11 +30,7 @@
 
 kern_return_t (*_thread_convert_thread_state)(thread_act_t thread, int direction, thread_state_flavor_t flavor, thread_state_t in_state, mach_msg_type_number_t in_stateCnt, thread_state_t out_state, mach_msg_type_number_t *out_stateCnt);
 
-// Forward declaration
-static void symbolicate_shellcode(void);
-
-#define STACK_SIZE 0x8000//65536
-#define CODE_SIZE 512
+#define STACK_SIZE 0x8000
 
 char shellCode[] =
 #if defined(__x86_64__)
@@ -148,68 +143,42 @@ char shellCode[] =
 /* Globals */
 char *libPathField = 0;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-dispatch_queue_t queue = 0;
+
+// Bytes from LIBLIBLIB to the end of shellCode, including the final NUL.
+static size_t lib_path_capacity(void) {
+    return libPathField ? sizeof(shellCode) - (size_t)(libPathField - shellCode) : 0;
+}
 
 static kern_return_t inject_task(task_t remoteTask, const char *lib) {
-    kern_return_t kr = KERN_SUCCESS;
+    kern_return_t kr;
+    mach_vm_address_t remoteStack64 = 0;
+    mach_vm_address_t remoteCode64 = 0;
+    thread_act_t remoteThread = MACH_PORT_NULL;
 
-    fprintf(stderr, "inject_task: starting\n");
-    fflush(stderr);
+    if (strlen(lib) >= lib_path_capacity()) {
+        fprintf(stderr, "Loader path is longer than %zu bytes\n", lib_path_capacity() - 1);
+        return KERN_INVALID_ARGUMENT;
+    }
 
-    mach_vm_address_t remoteStack64 = (vm_address_t)NULL;
-    mach_vm_address_t remoteCode64 = (vm_address_t)NULL;
-
-    fprintf(stderr, "inject_task: allocating stack\n");
-    fflush(stderr);
     kr = mach_vm_allocate(remoteTask, &remoteStack64, STACK_SIZE, VM_FLAGS_ANYWHERE);
-    fprintf(stderr, "inject_task: mach_vm_allocate(stack) returned %d (%s)\n", kr, mach_error_string(kr));
-    fflush(stderr);
-    if (kr != KERN_SUCCESS) {
-        return kr;
-    }
+    if (kr != KERN_SUCCESS) goto fail;
 
-    //Allocate thread memory
-    fprintf(stderr, "inject_task: allocating code\n");
-    fflush(stderr);
-    remoteCode64 = (vm_address_t)NULL;
     kr = mach_vm_allocate(remoteTask, &remoteCode64, sizeof(shellCode), VM_FLAGS_ANYWHERE);
-    fprintf(stderr, "inject_task: mach_vm_allocate(code) returned %d (%s)\n", kr, mach_error_string(kr));
-    fflush(stderr);
-    if (kr != KERN_SUCCESS) {
-        return kr;
-    }
+    if (kr != KERN_SUCCESS) goto fail;
 
-    fprintf(stderr, "inject_task: writing shellcode\n");
-    fflush(stderr);
     pthread_mutex_lock(&lock);
-    strcpy(libPathField, lib);
-    kr = mach_vm_write(remoteTask,
-                       remoteCode64,
-                       (vm_address_t)shellCode,
-                       sizeof(shellCode));
-
+    memset(libPathField, 0, lib_path_capacity());
+    memcpy(libPathField, lib, strlen(lib));
+    kr = mach_vm_write(remoteTask, remoteCode64, (vm_address_t)shellCode, sizeof(shellCode));
     pthread_mutex_unlock(&lock);
-    fprintf(stderr, "inject_task: mach_vm_write returned %d (%s)\n", kr, mach_error_string(kr));
-    fflush(stderr);
-    if (kr != KERN_SUCCESS) {
-        return kr;
-    }
+    if (kr != KERN_SUCCESS) goto fail;
 
-    fprintf(stderr, "inject_task: setting code protection\n");
-    fflush(stderr);
     kr = vm_protect(remoteTask, remoteCode64, sizeof(shellCode), FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    fprintf(stderr, "inject_task: vm_protect(code) returned %d (%s)\n", kr, mach_error_string(kr));
-    fflush(stderr);
+    if (kr != KERN_SUCCESS) goto fail;
 
-    fprintf(stderr, "inject_task: setting stack protection\n");
-    fflush(stderr);
     kr = vm_protect(remoteTask, remoteStack64, STACK_SIZE, TRUE, VM_PROT_READ | VM_PROT_WRITE);
-    fprintf(stderr, "inject_task: vm_protect(stack) returned %d (%s)\n", kr, mach_error_string(kr));
-    fflush(stderr);
-    if (kr != KERN_SUCCESS) {
-        return kr;
-    }
-    
+    if (kr != KERN_SUCCESS) goto fail;
+
 #if defined(__x86_64__)
     x86_thread_state64_t threadState;
     x86_thread_state64_t machineThreadState;
@@ -223,122 +192,81 @@ static kern_return_t inject_task(task_t remoteTask, const char *lib) {
     mach_msg_type_number_t stateCnt = ARM_UNIFIED_THREAD_STATE_COUNT;
     mach_msg_type_number_t machineStateCnt = ARM_UNIFIED_THREAD_STATE_COUNT;
 #endif
-    
-    thread_act_t         remoteThread = 0;
+
     memset(&threadState, '\0', sizeof(threadState));
     memset(&machineThreadState, '\0', sizeof(machineThreadState));
-    remoteStack64 += (STACK_SIZE / 2);
-    
+    // The shellcode gets the lower half of the stack region as scratch in its first argument.
+    mach_vm_address_t stackMiddle = remoteStack64 + (STACK_SIZE / 2);
+
 #if defined(__x86_64__)
-    threadState.__rdi = (uint64_t)(remoteStack64);
-    threadState.__rip = (uint64_t)(vm_address_t) remoteCode64;
-    threadState.__rsp = (uint64_t)((remoteStack64 + (STACK_SIZE/2)) - 8);
+    threadState.__rdi = (uint64_t)stackMiddle;
+    threadState.__rip = (uint64_t)remoteCode64;
+    threadState.__rsp = (uint64_t)((stackMiddle + (STACK_SIZE/2)) - 8);
 #elif defined(__arm64__)
     threadState.ash.flavor = ARM_THREAD_STATE64;
     threadState.ash.count = ARM_THREAD_STATE64_COUNT;
-    
-    threadState.ts_64.__x[0] = (uint64_t)(remoteStack64);
+    threadState.ts_64.__x[0] = (uint64_t)stackMiddle;
     __darwin_arm_thread_state64_set_pc_fptr(threadState.ts_64,
                                             ptrauth_sign_unauthenticated(ADDR_TO_PTR(remoteCode64), ptrauth_key_asia, 0));
-
-    __darwin_arm_thread_state64_set_sp(threadState.ts_64, (unsigned long)
-                                       ((remoteStack64 + (STACK_SIZE/2))));
+    __darwin_arm_thread_state64_set_sp(threadState.ts_64, (unsigned long)(stackMiddle + (STACK_SIZE/2)));
 #endif
 
-    fprintf(stderr, "inject_task: creating thread\n");
-    fflush(stderr);
     kr = thread_create(remoteTask, &remoteThread);
-    fprintf(stderr, "inject_task: thread_create returned %d (%s)\n", kr, mach_error_string(kr));
-    fflush(stderr);
-    if(kr != KERN_SUCCESS) {
-        fprintf(stderr, "Could not create thread: error %s\n", mach_error_string(kr));
-        return kr;
-    }
+    if (kr != KERN_SUCCESS) goto fail;
 
-    fprintf(stderr, "inject_task: converting thread state\n");
-    fflush(stderr);
-    if(_thread_convert_thread_state) {
+    if (_thread_convert_thread_state) {
         kr = _thread_convert_thread_state(remoteThread, 2, flavor, (thread_state_t)&threadState, stateCnt, (thread_state_t)&machineThreadState, &machineStateCnt);
-        fprintf(stderr, "inject_task: thread_convert_thread_state returned %d (%s)\n", kr, mach_error_string(kr));
-        fflush(stderr);
-        if(kr != KERN_SUCCESS) {
-            fprintf(stderr, "Could not convert thread state: error %d %s\n", kr, mach_error_string(kr));
-            return kr;
-        }
+        if (kr != KERN_SUCCESS) goto fail;
     } else {
-        fprintf(stderr, "inject_task: _thread_convert_thread_state not available, using direct copy\n");
-        fflush(stderr);
         machineThreadState = threadState;
     }
 
-    fprintf(stderr, "inject_task: setting thread state\n");
-    fflush(stderr);
     kr = thread_set_state(remoteThread, flavor, (thread_state_t)&machineThreadState, machineStateCnt);
-    fprintf(stderr, "inject_task: thread_set_state returned %d (%s)\n", kr, mach_error_string(kr));
-    fflush(stderr);
-    if(kr != KERN_SUCCESS) {
-        fprintf(stderr, "Could not set thread state: error %s\n", mach_error_string(kr));
-        return kr;
-    }
-    
-    kr = thread_resume(remoteThread);
-    if(kr != KERN_SUCCESS) {
-        fprintf(stderr, "Could not start thread: error %s\n", mach_error_string(kr));
-        return kr;
-    }
+    if (kr != KERN_SUCCESS) goto fail;
 
+    kr = thread_resume(remoteThread);
+    if (kr != KERN_SUCCESS) goto fail;
+
+    // The running thread owns the stack and code now, so they stay allocated.
     mach_port_deallocate(mach_task_self(), remoteThread);
+    return KERN_SUCCESS;
+
+fail:
+    fprintf(stderr, "Injection failed: %s\n", mach_error_string(kr));
+    if (remoteThread != MACH_PORT_NULL) {
+        thread_terminate(remoteThread);
+        mach_port_deallocate(mach_task_self(), remoteThread);
+    }
+    if (remoteCode64) mach_vm_deallocate(remoteTask, remoteCode64, sizeof(shellCode));
+    if (remoteStack64) mach_vm_deallocate(remoteTask, remoteStack64, STACK_SIZE);
     return kr;
 }
 
-void inject_sync(pid_t pid, const char *lib) {
-    fprintf(stderr, "inject_sync: starting for pid %d\n", pid);
-
-    // Ensure shellcode is symbolicated
+kern_return_t inject_sync(pid_t pid, const char *lib) {
     if (!libPathField) {
-        fprintf(stderr, "inject_sync: libPathField is NULL, calling symbolicate_shellcode\n");
-        void *module = dlopen ("/usr/lib/system/libsystem_kernel.dylib", RTLD_GLOBAL | RTLD_LAZY);
-        _thread_convert_thread_state = dlsym (module, "thread_convert_thread_state");
-        dlclose (module);
-        symbolicate_shellcode();
+        fprintf(stderr, "Shellcode has no library path field\n");
+        return KERN_FAILURE;
     }
 
-    if (!libPathField) {
-        fprintf(stderr, "inject_sync: libPathField still NULL after init!\n");
-        return;
-    }
-
-    fprintf(stderr, "inject_sync: calling task_for_pid\n");
     task_t task;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    fprintf(stderr, "inject_sync: task_for_pid returned %d\n", kr);
-    if(kr != KERN_SUCCESS)
-        return;
-
-    fprintf(stderr, "inject_sync: calling inject_task (task=%d)\n", task);
-    fflush(stderr);
-    kr = inject_task(task, lib);
-    fprintf(stderr, "inject_sync: inject_task returned %d\n", kr);
-    if(kr != KERN_SUCCESS) {
-        fprintf(stderr, "Could not perform injection for %d: %s\n", pid, mach_error_string(kr));
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "task_for_pid(%d) failed: %s\n", pid, mach_error_string(kr));
+        return kr;
     }
+
+    kr = inject_task(task, lib);
     mach_port_deallocate(mach_task_self(), task);
-    fprintf(stderr, "inject_sync: done\n");
-}
-    
-void inject(pid_t pid, const char *lib) {
-    dispatch_async(queue, ^{
-        inject_sync(pid, lib);
-    });
+    return kr;
 }
 
 static void symbolicate_shellcode(void) {
     uint64_t addrOfPthreadCreate = (uint64_t)dlsym(RTLD_DEFAULT, "pthread_create_from_mach_thread");
-    uint64_t addrOfPthreadSetSelf = (uint64_t)dlsym(RTLD_DEFAULT, "_pthread_set_self"); //(uint64_t) _pthread_set_self;
+    uint64_t addrOfPthreadSetSelf = (uint64_t)dlsym(RTLD_DEFAULT, "_pthread_set_self");
     uint64_t addrOfThreadSelf = (uint64_t)mach_thread_self;
     uint64_t addrOfThreadTerminate = (uint64_t)thread_terminate;
     uint64_t addrOfDlopen = (uint64_t)dlopen;
-    
+
 #if defined(__arm64__)
     addrOfPthreadCreate = (uint64_t)ptrauth_strip(ADDR_TO_PTR(addrOfPthreadCreate), ptrauth_key_function_pointer);
     addrOfPthreadSetSelf = (uint64_t)ptrauth_strip(ADDR_TO_PTR(addrOfPthreadSetSelf), ptrauth_key_function_pointer);
@@ -346,43 +274,24 @@ static void symbolicate_shellcode(void) {
     addrOfThreadTerminate = (uint64_t)ptrauth_strip(ADDR_TO_PTR(addrOfThreadTerminate), ptrauth_key_function_pointer);
     addrOfDlopen = (uint64_t)ptrauth_strip(ADDR_TO_PTR(addrOfDlopen), ptrauth_key_function_pointer);
 #endif
-    
-    char *possiblePatchLocation = (shellCode);
-    for (int i = 0 ; i < sizeof(shellCode); i++) {
-        possiblePatchLocation++;
-        
-        if (memcmp (possiblePatchLocation, "PTHRDCRT", 8) == 0) {
-            memcpy(possiblePatchLocation, &addrOfPthreadCreate, sizeof(uint64_t));
-        }
-        
-        if (memcmp (possiblePatchLocation, "PTHRDSS_", 8) == 0) {
-            memcpy(possiblePatchLocation, &addrOfPthreadSetSelf, sizeof(uint64_t));
-        }
-        
-        if (memcmp (possiblePatchLocation, "THRDSELF", 8) == 0) {
-            memcpy(possiblePatchLocation, &addrOfThreadSelf, sizeof(uint64_t));
-        }
-        
-        if (memcmp (possiblePatchLocation, "THRDTERM", 8) == 0) {
-            memcpy(possiblePatchLocation, &addrOfThreadTerminate, sizeof(uint64_t));
-        }
-        
-        if (memcmp(possiblePatchLocation, "DLOPEN__", 6) == 0) {
-            memcpy(possiblePatchLocation, &addrOfDlopen, sizeof(uint64_t));
-        }
-        
-        if (memcmp(possiblePatchLocation, "LIBLIBLIB", 9) == 0) {
-            libPathField = possiblePatchLocation;
-        }
+
+    // Markers are at most 9 bytes, so the last compare still ends inside shellCode.
+    for (size_t i = 0; i + 9 <= sizeof(shellCode); i++) {
+        char *p = shellCode + i;
+        if (memcmp(p, "PTHRDCRT", 8) == 0) memcpy(p, &addrOfPthreadCreate, sizeof(uint64_t));
+        else if (memcmp(p, "PTHRDSS_", 8) == 0) memcpy(p, &addrOfPthreadSetSelf, sizeof(uint64_t));
+        else if (memcmp(p, "THRDSELF", 8) == 0) memcpy(p, &addrOfThreadSelf, sizeof(uint64_t));
+        else if (memcmp(p, "THRDTERM", 8) == 0) memcpy(p, &addrOfThreadTerminate, sizeof(uint64_t));
+        else if (memcmp(p, "DLOPEN__", 8) == 0) memcpy(p, &addrOfDlopen, sizeof(uint64_t));
+        else if (memcmp(p, "LIBLIBLIB", 9) == 0) libPathField = p;
     }
 }
 
 __attribute__((constructor))
-static void ctor() {
-    void *module = dlopen ("/usr/lib/system/libsystem_kernel.dylib", RTLD_GLOBAL | RTLD_LAZY);
-    _thread_convert_thread_state = dlsym (module, "thread_convert_thread_state");
-    dlclose (module);
+static void ctor(void) {
+    void *module = dlopen("/usr/lib/system/libsystem_kernel.dylib", RTLD_GLOBAL | RTLD_LAZY);
+    _thread_convert_thread_state = dlsym(module, "thread_convert_thread_state");
+    dlclose(module);
 
     symbolicate_shellcode();
-    queue = dispatch_queue_create("injectorQueue", DISPATCH_QUEUE_CONCURRENT);
 }

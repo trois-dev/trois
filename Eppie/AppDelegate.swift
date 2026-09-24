@@ -233,30 +233,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        // Initial injection into all running apps
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            Injector.shared.injectAll()
-        }
+        Injector.shared.injectAll()
 
-        // Watch for new app launches
         appLaunchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] notification in
-            guard self != nil,
-                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  app.activationPolicy == .regular,
-                  app.bundleIdentifier != Bundle.main.bundleIdentifier else {
-                return
-            }
-
-            // Delay injection slightly to let app initialize
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                let pid = app.processIdentifier
-                print("Trois: Auto-injecting into \(app.localizedName ?? "Unknown") (pid \(pid))")
-                _ = Injector.shared.inject(into: pid)
-            }
+        ) { notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            Injector.shared.inject(into: app)
         }
     }
 
@@ -311,16 +296,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if sender.state == .on {
             sender.state = .off
             if SIPDetector.shared.sipDisabled {
-                // Injection mode - nothing to stop (injected code stays in apps)
+                // Injected loaders check the flag on every draw.
                 UserDefaults.standard.set(false, forKey: "troisEnabled")
+                Injector.shared.notifyThemeChanged()
             } else {
                 stopTracking()
             }
         } else {
             if SIPDetector.shared.sipDisabled {
-                // Injection mode - just mark as enabled, injection happens separately
                 sender.state = .on
                 UserDefaults.standard.set(true, forKey: "troisEnabled")
+                Injector.shared.notifyThemeChanged()
             } else {
                 // Overlay mode - need accessibility permission
                 let trusted = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String

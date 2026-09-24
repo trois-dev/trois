@@ -9,9 +9,10 @@
 #define UniversalInj_h
 
 #include <stdio.h>
-#include <sys/types.h>    //NOTE: Added
+#include <sys/types.h>
+#include <mach/mach.h>
 
-void inject(pid_t pid, const char *lib);
-void inject_sync(pid_t pid, const char *lib);
+// Loads the library at lib into the process. Needs root and SIP debugging restrictions off.
+kern_return_t inject_sync(pid_t pid, const char *lib);
 
 #endif /* UniversalInj_h */
