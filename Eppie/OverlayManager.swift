@@ -458,12 +458,39 @@ func visiblePath(_ bounds: CGRect, minus covered: [CGRect]) -> CGPath {
 /// canvas on a traffic light puts the art off center. One box covers every
 /// state of a button, so pressing it doesn't shift the art.
 enum ButtonArt {
+    /// How art smaller than the system button's circle is fitted over it.
+    enum Sizing: String, CaseIterable {
+        // Trimmed, drawn 1:1, edge pixels grown outward until the circle is covered.
+        case bleed
+        // Untrimmed and unscaled. The circle can show around small art.
+        case original
+        // Trimmed and scaled by any factor until it covers the circle.
+        case stretch
+
+        static let defaultsKey = "buttonSizing"
+
+        static var current: Sizing {
+            UserDefaults.standard.string(forKey: defaultsKey).flatMap(Sizing.init) ?? .bleed
+        }
+
+        var title: String {
+            switch self {
+            case .bleed: return "Actual size, fill edges"
+            case .original: return "Actual size"
+            case .stretch: return "Stretch to fit"
+            }
+        }
+    }
+
     /// Loads each file at its pixel size, trimmed to the opaque box shared by
     /// all images of the same pixel size. Missing files come back nil.
-    static func load(_ paths: [String?]) -> [NSImage?] {
+    static func load(_ paths: [String?], trim: Bool = true) -> [NSImage?] {
         let images: [CGImage?] = paths.map { path in
             guard let path, let image = NSImage(contentsOfFile: path) else { return nil }
             return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
+        guard trim else {
+            return images.map { $0.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) } }
         }
         // Keyed by pixel width and height.
         var boxes: [[Int]: CGRect] = [:]
@@ -501,6 +528,133 @@ enum ButtonArt {
         guard maxX >= 0 else { return nil }
         return CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
     }
+
+    /// Fits `image` (1px = 1pt) over a system circle `cover` points wide on a
+    /// display with `backing` device pixels per point. Art that already covers
+    /// it comes back unchanged.
+    static func sized(_ image: NSImage, cover: CGFloat, backing: CGFloat, mode: Sizing) -> NSImage {
+        let size = image.size
+        guard size.width > 0, size.height > 0,
+              size.width < cover || size.height < cover else { return image }
+        switch mode {
+        case .original:
+            return image
+        case .stretch:
+            // Nearest neighbor keeps pixel art sharp, but a non-integer scale
+            // makes some pixels a device pixel wider than others.
+            let scale = max(cover / size.width, cover / size.height)
+            let target = NSSize(width: ceil(size.width * scale), height: ceil(size.height * scale))
+            return NSImage(size: target, flipped: false) { rect in
+                NSGraphicsContext.current?.imageInterpolation = .none
+                image.draw(in: rect)
+                return true
+            }
+        case .bleed:
+            guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
+            return bled(cgImage, cover: cover, backing: backing) ?? image
+        }
+    }
+
+    /// Draws the art at a whole number of device pixels per art pixel, then
+    /// grows its outer edge one device pixel ring at a time, copying the
+    /// nearest opaque color, until no transparent pixel inside the circle is
+    /// reachable from outside. Holes enclosed by the art stay transparent.
+    private static func bled(_ image: CGImage, cover: CGFloat, backing: CGFloat) -> NSImage? {
+        let s = max(1, Int(backing.rounded()))
+        let w = image.width, h = image.height
+        let diameter = cover * CGFloat(s)
+        // Very small art on a 2x display: 1.5x is exactly 3 device pixels per
+        // art pixel, so it stays sharp and needs less bleed.
+        let k = s == 2 && CGFloat(min(w, h)) + 3 < cover ? 3 : s
+        let artW = w * k, artH = h * k
+        // Room for the bleed to grow past the circle on square art.
+        let margin = 2 * s
+        let side = Int(ceil(diameter)) + 2 * margin
+        let width = max(artW, side), height = max(artH, side)
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        context.interpolationQuality = .none
+        let ox = (width - artW) / 2, oy = (height - artH) / 2
+        context.draw(image, in: CGRect(x: ox, y: oy, width: artW, height: artH))
+
+        // Pixels are centered at +0.5. The disc is a device pixel wider than
+        // the circle to cover its antialiased rim.
+        let cx = CGFloat(width) / 2, cy = CGFloat(height) / 2
+        let r = (diameter + 1) / 2
+        func inDisc(_ x: Int, _ y: Int) -> Bool {
+            let dx = CGFloat(x) + 0.5 - cx, dy = CGFloat(y) + 0.5 - cy
+            return dx * dx + dy * dy <= r * r
+        }
+        func alpha(_ i: Int) -> UInt8 { data[i * 4 + 3] }
+
+        // Transparent pixels connected to the border.
+        var outside = [Bool](repeating: false, count: width * height)
+        var stack: [Int] = []
+        for x in 0..<width { stack.append(x); stack.append((height - 1) * width + x) }
+        for y in 0..<height { stack.append(y * width); stack.append(y * width + width - 1) }
+        while let i = stack.popLast() {
+            guard !outside[i], alpha(i) == 0 else { continue }
+            outside[i] = true
+            let x = i % width, y = i / width
+            if x > 0 { stack.append(i - 1) }
+            if x < width - 1 { stack.append(i + 1) }
+            if y > 0 { stack.append(i - width) }
+            if y < height - 1 { stack.append(i + width) }
+        }
+
+        func uncovered() -> Bool {
+            for y in 0..<height {
+                for x in 0..<width where outside[y * width + x] && alpha(y * width + x) == 0 && inDisc(x, y) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        // Each pass adds one ring in all 8 directions, so square art stays square.
+        var passes = 0
+        while uncovered() && passes < width {
+            passes += 1
+            var fills: [(Int, Int)] = []
+            for y in 0..<height {
+                for x in 0..<width {
+                    let i = y * width + x
+                    guard outside[i], alpha(i) == 0 else { continue }
+                    // Side neighbors first, so a rounded corner copies the
+                    // outline next to it rather than the fill diagonally inside.
+                    var best = -1
+                    for diagonal in [false, true] where best < 0 {
+                        for ny in max(0, y - 1)...min(height - 1, y + 1) {
+                            for nx in max(0, x - 1)...min(width - 1, x + 1) where (nx != x && ny != y) == diagonal {
+                                let n = ny * width + nx
+                                if alpha(n) > 0 && (best < 0 || alpha(n) > alpha(best)) { best = n }
+                            }
+                        }
+                    }
+                    if best >= 0 { fills.append((i, best)) }
+                }
+            }
+            if fills.isEmpty { break }
+            // Premultiplied: unpremultiply the source so the fill is fully opaque.
+            for (i, n) in fills {
+                let a = Int(data[n * 4 + 3])
+                for c in 0..<3 { data[i * 4 + c] = UInt8(min(255, Int(data[n * 4 + c]) * 255 / a)) }
+                data[i * 4 + 3] = 255
+            }
+        }
+
+        // Crop to the opaque pixels, symmetric about the center so the art
+        // stays centered on the button.
+        guard let filled = context.makeImage(), let box = opaqueBounds(filled) else { return nil }
+        let halfW = max(CGFloat(width) / 2 - box.minX, box.maxX - CGFloat(width) / 2)
+        let halfH = max(CGFloat(height) / 2 - box.minY, box.maxY - CGFloat(height) / 2)
+        let crop = CGRect(x: CGFloat(width) / 2 - halfW, y: CGFloat(height) / 2 - halfH, width: 2 * halfW, height: 2 * halfH).integral
+        guard let cropped = filled.cropping(to: crop) else { return nil }
+        return NSImage(cgImage: cropped, size: NSSize(width: CGFloat(cropped.width) / CGFloat(s),
+                                                        height: CGFloat(cropped.height) / CGFloat(s)))
+    }
 }
 
 enum TrafficLightType {
@@ -526,6 +680,8 @@ class OverlayWindow: NSWindow {
     // system draws it 1pt inside the AX button frame: 14pt in a 16pt frame on
     // macOS 27, 12pt before.
     private var coverSize: CGFloat = 14
+    // Device pixels per point on the display under the button.
+    private var backingScale: CGFloat = NSScreen.main?.backingScaleFactor ?? 2
     // Set after a window-server move AppKit didn't see. AppKit's cached frame
     // keeps the old origin until syncAppKitFrame().
     private var appKitStale = false
@@ -652,22 +808,31 @@ class OverlayWindow: NSWindow {
         let states = ["", "Hover", "Pressed", "Disabled"]
         let keys = bases.flatMap { base in states.map { base + $0 + "Image" } }
         guard let index = keys.firstIndex(of: baseKey + state + "Image") else { return nil }
-        return ButtonArt.load(keys.map { defaults.string(forKey: $0) })[index]
+        let trim = ButtonArt.Sizing.current != .original
+        return ButtonArt.load(keys.map { defaults.string(forKey: $0) }, trim: trim)[index]
     }
 
-    /// Scales an image smaller than the system button's circle up until it covers
-    /// it, keeping the aspect ratio. Nearest neighbor keeps pixel art sharp.
+    /// Fits an image smaller than the system button's circle over it, per the
+    /// Buttons setting.
     private func coveringSystemButton(_ image: NSImage) -> NSImage {
-        let size = image.size
-        guard size.width > 0, size.height > 0,
-              size.width < coverSize || size.height < coverSize else { return image }
-        let scale = max(coverSize / size.width, coverSize / size.height)
-        let target = NSSize(width: ceil(size.width * scale), height: ceil(size.height * scale))
-        return NSImage(size: target, flipped: false) { rect in
-            NSGraphicsContext.current?.imageInterpolation = .none
-            image.draw(in: rect)
-            return true
+        ButtonArt.sized(image, cover: coverSize, backing: backingScale, mode: .current)
+    }
+
+    /// Scale of the display under the button. AppKit's own screen can be stale
+    /// after a window-server move, so this looks it up from the button center.
+    private func currentBackingScale() -> CGFloat {
+        if buttonCenter != .zero {
+            let point = convertAXToCocoaCoordinates(buttonCenter)
+            if let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) {
+                return screen.backingScaleFactor
+            }
         }
+        return screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    /// Rounds down to the device pixel grid so pixel art isn't resampled.
+    private func snapped(_ value: CGFloat) -> CGFloat {
+        (value * backingScale).rounded(.down) / backingScale
     }
 
     // File images arrive with size already set to their pixel dimensions.
@@ -685,8 +850,8 @@ class OverlayWindow: NSWindow {
         appKitStale = false
 
         let cocoaPoint = convertAXToCocoaCoordinates(buttonCenter)
-        let x = cocoaPoint.x - imageSize.width / 2
-        let y = cocoaPoint.y - imageSize.height / 2
+        let x = snapped(cocoaPoint.x - imageSize.width / 2)
+        let y = snapped(cocoaPoint.y - imageSize.height / 2)
 
         setFrameOrigin(NSPoint(x: x, y: y))
     }
@@ -733,16 +898,19 @@ class OverlayWindow: NSWindow {
         )
 
         // Rescale images if this window's buttons are a different size
+        // or it moved to a display with a different scale.
         let size = min(frame.width, frame.height) - 2
-        if size > 0 && size != coverSize {
-            coverSize = size
+        let scale = currentBackingScale()
+        if (size > 0 && size != coverSize) || scale != backingScale {
+            if size > 0 { coverSize = size }
+            backingScale = scale
             reloadImageForMouseState()
         }
 
         // Convert to Cocoa coordinates and position window centered on button
         let cocoaPoint = convertAXToCocoaCoordinates(buttonCenter)
-        let x = cocoaPoint.x - imageSize.width / 2
-        let y = cocoaPoint.y - imageSize.height / 2
+        let x = snapped(cocoaPoint.x - imageSize.width / 2)
+        let y = snapped(cocoaPoint.y - imageSize.height / 2)
 
         let cocoaFrame = NSRect(x: x, y: y, width: imageSize.width, height: imageSize.height)
         appKitStale = false
@@ -752,7 +920,7 @@ class OverlayWindow: NSWindow {
 
     /// Window-server origin (global top-left) that centers this overlay on `center`.
     func origin(centeredOn center: CGPoint) -> CGPoint {
-        CGPoint(x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2)
+        CGPoint(x: snapped(center.x - imageSize.width / 2), y: snapped(center.y - imageSize.height / 2))
     }
 
     /// Records a move the window server already applied.

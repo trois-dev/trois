@@ -576,10 +576,12 @@ struct ThemeEditorView: View {
     private func buttonImage(_ button: EditorButton) -> NSImage? {
         let defaults = UserDefaults.standard
         let suffix = state == .pressed && button != pressedButton ? "" : state.buttonSuffix
-        // Trimmed like the overlays, to the box all of the button's states share.
+        // Trimmed and sized like the overlays, to the box all of the button's states share.
+        let mode = ButtonArt.Sizing.current
         let suffixes = ["", "Hover", "Pressed", "Disabled"]
-        let images = ButtonArt.load(suffixes.map { defaults.string(forKey: button.key($0)) })
-        return suffixes.firstIndex(of: suffix).flatMap { images[$0] } ?? images[0]
+        let images = ButtonArt.load(suffixes.map { defaults.string(forKey: button.key($0)) }, trim: mode != .original)
+        let image = suffixes.firstIndex(of: suffix).flatMap { images[$0] } ?? images[0]
+        return image.map { ButtonArt.sized($0, cover: 14, backing: 2, mode: mode) }
     }
 
     private func part(at point: CGPoint, _ g: CanvasGeometry, rendered: RenderedFrame?) -> EditorPart? {

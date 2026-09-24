@@ -517,6 +517,7 @@ struct ThemePickerView: View {
     @ObservedObject var themeManager = ThemeManager.shared
     @AppStorage("windowBorders") private var windowBorders = true
     @AppStorage("frameButtons") private var frameButtons = false
+    @AppStorage(ButtonArt.Sizing.defaultsKey) private var buttonSizing = ButtonArt.Sizing.bleed.rawValue
     @State private var showingInstallSheet = false
     @State private var dragOver = false
     @State private var installError: String?
@@ -585,6 +586,21 @@ struct ThemePickerView: View {
                 .onChange(of: windowBorders) { _ in reloadOverlays() }
                 .onChange(of: frameButtons) { _ in reloadOverlays() }
             }
+
+            Divider()
+            HStack {
+                Picker("Small buttons", selection: $buttonSizing) {
+                    ForEach(ButtonArt.Sizing.allCases, id: \.rawValue) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .fixedSize()
+                .help("How art smaller than the system buttons covers them")
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .onChange(of: buttonSizing) { _ in reloadOverlays() }
 
             Divider()
 
@@ -682,10 +698,12 @@ struct ThemePickerView: View {
         }
     }
 
-    // Trimmed like the overlays, so the art lines up the way it does on screen.
+    // Trimmed and sized like the overlays, so the art lines up the way it does on screen.
     private func themePreview(_ theme: Theme) -> some View {
+        let mode = ButtonArt.Sizing(rawValue: buttonSizing) ?? .bleed
         func upImage(_ states: [URL?]) -> NSImage? {
-            ButtonArt.load(states.map { $0?.path })[0]
+            ButtonArt.load(states.map { $0?.path }, trim: mode != .original)[0]
+                .map { ButtonArt.sized($0, cover: 14, backing: 2, mode: mode) }
         }
         return HStack(spacing: 4) {
             if let image = upImage([theme.closeUp, theme.closeHover, theme.closeDown, theme.closeDisabled]) {
