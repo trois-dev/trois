@@ -43,27 +43,42 @@ To restore default security settings:
 3. Reboot
 4. Run `sudo defaults delete /Library/Preferences/com.apple.security.libraryvalidation.plist DisableLibraryValidation`
 
+## Getting Themes
+
+Trois ships without themes. Get them from the catalog:
+
+- In Trois: Settings > Get Themes, then Install.
+- On the web: the gallery at https://sryo.github.io/trois-themes/. Install opens Trois, which downloads the theme and applies it.
+
+The catalog lives in the `trois-themes` repo. Trois only installs themes listed there and checks each download against the catalog's SHA-256.
+
+You can also drop a theme zip or folder onto Settings > Themes, or use Install Theme. Installed themes go in `~/Library/Application Support/Trois/Themes/`.
+
 ## Creating Themes
 
-A theme is a folder containing button images. Place themes in:
-- `~/Library/Application Support/Trois/Themes/`
+A theme is a folder of button images (BMP, PNG, JPEG, GIF or TIFF) with a `theme.json` that says which image is which button:
 
-### Image Naming
+```json
+{
+  "name": "My Theme",
+  "author": "Your Name",
+  "version": 1,
+  "buttons": {
+    "close": "close_up.png",
+    "closeDown": "close_down.png",
+    "minimize": "min_up.png",
+    "minimizeDown": "min_down.png",
+    "zoom": "max_up.png",
+    "zoomDown": "max_down.png",
+    "restore": "restore_up.png",
+    "restoreDown": "restore_down.png"
+  }
+}
+```
 
-Trois looks for these image files (PNG, BMP, JPEG, TIFF):
+Button keys: `close`, `closeDown`, `closeDisabled`, `minimize`, `minimizeDown`, `minimizeDisabled`, `zoom`, `zoomDown`, `zoomDisabled`, `restore`, `restoreDown`, `help`, `helpDown`. Restore images show on the Zoom button while a window is zoomed or full screen.
 
-| Button | Normal | Hover | Pressed | Disabled |
-|--------|--------|-------|---------|----------|
-| Close | `close.png` | `close_hover.png` | `close_pressed.png` | `close_disabled.png` |
-| Minimize | `minimize.png` | `minimize_hover.png` | `minimize_pressed.png` | `minimize_disabled.png` |
-| Zoom | `maximize.png` | `maximize_hover.png` | `maximize_pressed.png` | `maximize_disabled.png` |
-| Restore | `restore_up.png` | - | `restore_down.png` | - |
-
-**Note:** Restore images are shown on the Zoom button when a window is maximized/fullscreen. If no restore images are provided, the maximize images are used.
-
-Alternative naming patterns are also supported (e.g., `closebox.bmp`, `close_up.png`, `cls.bmp`).
-
-- Theme authors: kepplah, Spyder, Nikkie, KMR, VisualGroup, GooeyGoo, Joel Engdahl, Djoole, N-I-C, Tara, Crash, Weez, VoX, and others
+Without `theme.json`, Trois guesses from file names such as `close_up`, `close_down`, `min_up`, `max_up`, `restore_up` and `help_up` (underscores or spaces). To share a theme, add it to the catalog repo with a pull request.
 
 ## License
 

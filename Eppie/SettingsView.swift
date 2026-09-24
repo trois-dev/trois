@@ -1,25 +1,171 @@
 // Settings UI for themes and button customization.
 import SwiftUI
 
+enum SettingsTab: Hashable {
+    case themes, getThemes, custom, about
+}
+
+// Lets the app open Settings on a given tab, e.g. for a trois:// link.
+final class SettingsNavigation: ObservableObject {
+    static let shared = SettingsNavigation()
+    @Published var tab: SettingsTab = .themes
+}
+
 struct SettingsView: View {
     @StateObject private var themeManager = ThemeManager.shared
-    @State private var selectedTab = 0
+    @ObservedObject private var navigation = SettingsNavigation.shared
 
     var body: some View {
-        TabView(selection: $selectedTab) {
+        TabView(selection: $navigation.tab) {
             ThemePickerView()
                 .tabItem { Label("Themes", systemImage: "paintpalette") }
-                .tag(0)
+                .tag(SettingsTab.themes)
+
+            CatalogView()
+                .tabItem { Label("Get Themes", systemImage: "arrow.down.circle") }
+                .tag(SettingsTab.getThemes)
 
             ManualSettingsView()
                 .tabItem { Label("Custom", systemImage: "slider.horizontal.3") }
-                .tag(1)
+                .tag(SettingsTab.custom)
 
             AboutView()
                 .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(2)
+                .tag(SettingsTab.about)
         }
         .frame(width: 500, height: 400)
+    }
+}
+
+struct CatalogView: View {
+    @ObservedObject var catalog = ThemeCatalog.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if catalog.themes.isEmpty {
+                VStack(spacing: 12) {
+                    Spacer()
+                    if let error = catalog.loadError, !catalog.isLoading {
+                        Text(error)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("Try Again") { catalog.refresh() }
+                    } else {
+                        ProgressView()
+                    }
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 16) {
+                        ForEach(catalog.themes) { entry in
+                            CatalogCard(entry: entry)
+                        }
+                    }
+                    .padding()
+                }
+            }
+
+            Divider()
+
+            HStack {
+                Text("Themes are the work of their authors.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button(action: { catalog.refresh() }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(catalog.isLoading)
+            }
+            .padding()
+        }
+        .onAppear {
+            if catalog.themes.isEmpty {
+                catalog.refresh()
+            }
+        }
+        .alert("Theme Not Installed", isPresented: Binding(
+            get: { catalog.installError != nil },
+            set: { if !$0 { catalog.installError = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(catalog.installError ?? "")
+        }
+    }
+}
+
+struct CatalogCard: View {
+    let entry: CatalogTheme
+    @ObservedObject var catalog = ThemeCatalog.shared
+    @ObservedObject var themeManager = ThemeManager.shared
+
+    private var installed: Theme? {
+        themeManager.installedTheme(named: entry.id)
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .frame(height: 60)
+                .overlay(preview)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                )
+
+            Text(entry.name)
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text("by \(entry.author)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            action
+                .controlSize(.small)
+                .frame(height: 22)
+        }
+        .frame(width: 120)
+    }
+
+    @ViewBuilder
+    private var action: some View {
+        if catalog.installing.contains(entry.id) {
+            ProgressView()
+                .scaleEffect(0.6)
+        } else if let installed, (installed.version ?? 0) >= entry.version {
+            if themeManager.currentTheme?.id == installed.id {
+                Text("Applied")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Button("Apply") { themeManager.applyTheme(installed) }
+            }
+        } else {
+            Button(installed == nil ? "Install" : "Update") { catalog.install(entry.id) }
+        }
+    }
+
+    // Previews are PNGs at their pixel size, like the theme grid.
+    private var preview: some View {
+        HStack(spacing: 4) {
+            ForEach(["close", "minimize", "zoom"], id: \.self) { key in
+                if let path = entry.preview[key], let url = catalog.url(for: path) {
+                    AsyncImage(url: url, scale: 1) { image in
+                        image.interpolation(.none)
+                    } placeholder: {
+                        Color.clear.frame(width: 14, height: 14)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -27,6 +173,7 @@ struct ThemePickerView: View {
     @ObservedObject var themeManager = ThemeManager.shared
     @State private var showingInstallSheet = false
     @State private var dragOver = false
+    @State private var installError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -100,9 +247,27 @@ struct ThemePickerView: View {
             allowsMultipleSelection: false
         ) { result in
             if case .success(let urls) = result, let url = urls.first {
-                _ = url.startAccessingSecurityScopedResource()
-                _ = themeManager.installTheme(from: url)
-                url.stopAccessingSecurityScopedResource()
+                let accessing = url.startAccessingSecurityScopedResource()
+                install(url) {
+                    if accessing { url.stopAccessingSecurityScopedResource() }
+                }
+            }
+        }
+        .alert("Theme Not Installed", isPresented: Binding(
+            get: { installError != nil },
+            set: { if !$0 { installError = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(installError ?? "")
+        }
+    }
+
+    private func install(_ url: URL, done: (() -> Void)? = nil) {
+        themeManager.installTheme(from: url) { result in
+            done?()
+            if case .failure(let error) = result {
+                installError = error.localizedDescription
             }
         }
     }
@@ -114,7 +279,7 @@ struct ThemePickerView: View {
             if let data = item as? Data,
                let url = URL(dataRepresentation: data, relativeTo: nil) {
                 DispatchQueue.main.async {
-                    _ = themeManager.installTheme(from: url)
+                    install(url)
                 }
             }
         }

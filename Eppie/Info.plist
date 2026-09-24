@@ -16,6 +16,17 @@
     <string>$(PRODUCT_NAME)</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.trois.app.themes</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>trois</string>
+            </array>
+        </dict>
+    </array>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleVersion</key>

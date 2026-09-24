@@ -1,4 +1,4 @@
-// Manages button themes - loading from folders/zips.
+// Manages button themes - loading, installing and applying them.
 import Cocoa
 import UniformTypeIdentifiers
 
@@ -7,6 +7,8 @@ struct Theme: Identifiable, Hashable {
     let name: String
     let path: URL
     var author: String?
+    // From theme.json; catalog themes use it to offer updates.
+    var version: Int?
     var closeUp: URL?
     var closeDown: URL?
     var closeDisabled: URL?
@@ -26,14 +28,24 @@ struct Theme: Identifiable, Hashable {
     }
 }
 
+// Optional theme.json in a theme folder. Catalog themes always have one.
+private struct ThemeManifest: Decodable {
+    let name: String?
+    let author: String?
+    let version: Int?
+    // Button key to image path relative to the theme folder.
+    let buttons: [String: String]?
+}
+
 class ThemeManager: ObservableObject {
     static let shared = ThemeManager()
 
     @Published var themes: [Theme] = []
     @Published var currentTheme: Theme?
 
-    private let themesDirectory: URL
+    let themesDirectory: URL
     private let fileManager = FileManager.default
+    private let installQueue = DispatchQueue(label: "Trois.themeinstall", qos: .userInitiated)
 
     // Author mapping from VirtualPlastic.net gallery
     private let knownAuthors: [String: String] = [
@@ -85,17 +97,7 @@ class ThemeManager: ObservableObject {
     }
 
     func loadThemes() {
-        var foundThemes: [Theme] = []
-
-        // Load bundled themes
-        if let bundledPath = Bundle.main.resourceURL?.appendingPathComponent("Themes") {
-            foundThemes.append(contentsOf: scanDirectory(bundledPath))
-        }
-
-        // Load user themes
-        foundThemes.append(contentsOf: scanDirectory(themesDirectory))
-
-        themes = foundThemes.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        themes = scanDirectory(themesDirectory).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     private func scanDirectory(_ directory: URL) -> [Theme] {
@@ -115,11 +117,27 @@ class ThemeManager: ObservableObject {
         return themes
     }
 
-    private func loadTheme(from directory: URL) -> Theme? {
+    /// Reads a theme folder. Nil when it has no close, minimize or zoom image.
+    /// Safe to call off the main thread.
+    func loadTheme(from directory: URL) -> Theme? {
         let name = directory.lastPathComponent
         var theme = Theme(id: directory.path, name: name, path: directory)
+
+        if let data = try? Data(contentsOf: directory.appendingPathComponent("theme.json")),
+           let manifest = try? JSONDecoder().decode(ThemeManifest.self, from: data) {
+            theme = Theme(id: directory.path, name: manifest.name ?? name, path: directory)
+            theme.author = manifest.author
+            theme.version = manifest.version
+            if let buttons = manifest.buttons {
+                applyManifestButtons(buttons, in: directory, to: &theme)
+                if theme.hasAnyImage {
+                    return theme
+                }
+            }
+        }
+
         // Try readme first, then fall back to known authors mapping
-        theme.author = parseAuthorFromReadme(in: directory) ?? knownAuthors[name]
+        theme.author = theme.author ?? parseAuthorFromReadme(in: directory) ?? knownAuthors[name]
 
         guard let files = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
             return nil
@@ -164,6 +182,30 @@ class ThemeManager: ObservableObject {
         }
 
         return theme.hasAnyImage ? theme : nil
+    }
+
+    private func applyManifestButtons(_ buttons: [String: String], in directory: URL, to theme: inout Theme) {
+        let root = directory.standardizedFileURL.path + "/"
+        func file(_ key: String) -> URL? {
+            guard let relative = buttons[key] else { return nil }
+            let url = directory.appendingPathComponent(relative).standardizedFileURL
+            // Paths must stay inside the theme folder.
+            guard url.path.hasPrefix(root), fileManager.fileExists(atPath: url.path) else { return nil }
+            return url
+        }
+        theme.closeUp = file("close")
+        theme.closeDown = file("closeDown")
+        theme.closeDisabled = file("closeDisabled")
+        theme.minimizeUp = file("minimize")
+        theme.minimizeDown = file("minimizeDown")
+        theme.minimizeDisabled = file("minimizeDisabled")
+        theme.maximizeUp = file("zoom")
+        theme.maximizeDown = file("zoomDown")
+        theme.maximizeDisabled = file("zoomDisabled")
+        theme.restoreUp = file("restore")
+        theme.restoreDown = file("restoreDown")
+        theme.helpUp = file("help")
+        theme.helpDown = file("helpDown")
     }
 
     private func matchesPattern(_ filename: String, patterns: [String]) -> Bool {
@@ -249,79 +291,42 @@ class ThemeManager: ObservableObject {
         return nil
     }
 
-    func installTheme(from url: URL) -> Bool {
-        let ext = url.pathExtension.lowercased()
-
-        if ext == "zip" {
-            return installFromZip(url)
-        } else {
-            var isDirectory: ObjCBool = false
-            if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                return installFromFolder(url)
+    /// Installs a zip or folder the user picked, off the main thread, and
+    /// reloads the list. Calls completion on main.
+    func installTheme(from url: URL, completion: ((Result<Theme, Error>) -> Void)? = nil) {
+        let name = url.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "[^a-zA-Z0-9_\\- ]", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        installQueue.async {
+            let result = Result { try ThemeInstaller.install(from: url, as: name.isEmpty ? "Theme" : name, into: self.themesDirectory) }
+            DispatchQueue.main.async {
+                self.loadThemes()
+                completion?(result.map { self.installedTheme(at: $0) ?? Theme(id: $0.path, name: name, path: $0) })
             }
-        }
-        return false
-    }
-
-    private func installFromZip(_ zipURL: URL) -> Bool {
-        let tempDir = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-
-        do {
-            try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
-
-            // Use ditto to unzip (available on macOS)
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-            process.arguments = ["-xk", zipURL.path, tempDir.path]
-            try process.run()
-            process.waitUntilExit()
-
-            guard process.terminationStatus == 0 else { return false }
-
-            // Find the theme folder (might be nested)
-            let contents = try fileManager.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.isDirectoryKey])
-
-            var sourceDir = tempDir
-            // If there's a single folder inside, use that
-            if contents.count == 1,
-               let first = contents.first,
-               (try? first.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                sourceDir = first
-            }
-
-            let themeName = zipURL.deletingPathExtension().lastPathComponent
-            let destDir = themesDirectory.appendingPathComponent(themeName)
-
-            if fileManager.fileExists(atPath: destDir.path) {
-                try fileManager.removeItem(at: destDir)
-            }
-
-            try fileManager.copyItem(at: sourceDir, to: destDir)
-            try fileManager.removeItem(at: tempDir)
-
-            loadThemes()
-            return true
-        } catch {
-            print("Failed to install theme from zip: \(error)")
-            try? fileManager.removeItem(at: tempDir)
-            return false
         }
     }
 
-    private func installFromFolder(_ folderURL: URL) -> Bool {
-        let themeName = folderURL.lastPathComponent
-        let destDir = themesDirectory.appendingPathComponent(themeName)
+    /// The loaded theme in `folder`, if any.
+    func installedTheme(at folder: URL) -> Theme? {
+        themes.first { $0.path.standardizedFileURL.path == folder.standardizedFileURL.path }
+    }
 
-        do {
-            if fileManager.fileExists(atPath: destDir.path) {
-                try fileManager.removeItem(at: destDir)
+    /// The installed theme with this catalog id, if any.
+    func installedTheme(named folderName: String) -> Theme? {
+        installedTheme(at: themesDirectory.appendingPathComponent(folderName))
+    }
+
+    // Themes used to ship inside the app, and an applied one stored image
+    // paths into the bundle. Reinstalls it from the catalog under the same id.
+    func migrateBundledTheme() {
+        guard let themeId = UserDefaults.standard.string(forKey: "currentThemeId"),
+              themeId.contains(".app/Contents/Resources/Themes/") else { return }
+        let id = URL(fileURLWithPath: themeId).lastPathComponent
+        ThemeCatalog.shared.install(id, quiet: true) { result in
+            // Offline tries again next launch; the default buttons show meanwhile.
+            if case .failure(ThemeInstallError.notInCatalog) = result {
+                self.clearTheme()
             }
-            try fileManager.copyItem(at: folderURL, to: destDir)
-            loadThemes()
-            return true
-        } catch {
-            print("Failed to install theme from folder: \(error)")
-            return false
         }
     }
 

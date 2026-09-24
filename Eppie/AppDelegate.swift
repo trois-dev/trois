@@ -22,6 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         print("Trois: Running in \(sipDetector.mode) mode")
 
         setupMenuBar()
+        ThemeManager.shared.migrateBundledTheme()
 
         // Set up mode based on SIP status
         if sipDetector.sipDisabled {
@@ -32,6 +33,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.checkAndRequestPermission()
             }
+        }
+    }
+
+    // trois://install/<id> from the theme gallery. Only ids in the catalog are
+    // installed; ThemeCatalog looks them up there.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme?.lowercased() == "trois" && url.host?.lowercased() == "install" {
+            let id = url.lastPathComponent
+            guard ThemeCatalog.isValidID(id) else { continue }
+            showSettings(tab: .getThemes)
+            ThemeCatalog.shared.install(id)
         }
     }
 
@@ -227,6 +239,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openSettings() {
+        showSettings(tab: nil)
+    }
+
+    private func showSettings(tab: SettingsTab?) {
+        if let tab {
+            SettingsNavigation.shared.tab = tab
+        }
         if settingsWindow == nil {
             let settingsView = SettingsView()
             settingsWindow = NSWindow(
