@@ -118,9 +118,7 @@ struct FramePreviewView<Buttons: View>: View {
 
     private func framed(_ preview: FramePreviewImage) -> some View {
         ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
-                .fill(Color(nsColor: .windowBackgroundColor))
-                .frame(width: preview.window.width, height: preview.window.height)
+            WindowSurface(size: preview.window.size)
                 .offset(x: preview.window.minX, y: preview.window.minY)
             Image(decorative: preview.image, scale: 2)
                 .interpolation(.none)
@@ -151,10 +149,46 @@ struct WindowCorners: View {
                 CGRect(x: window.width - r, y: window.height - r, width: r, height: r),
             ])
         }
-        RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
-            .fill(Color(nsColor: .windowBackgroundColor))
-            .frame(width: window.width, height: window.height)
+        WindowSurface(size: window.size)
             .mask(squares)
             .offset(x: window.minX, y: window.minY)
+    }
+}
+
+/// A preview window's own surface: its fill and, when there's room, a sidebar
+/// down the left, so the buttons sit where most Mac apps put them.
+struct WindowSurface: View {
+    let size: CGSize
+
+    // Kept in step with .sidebar in the catalog's scripts/build.py.
+    private static let inset: CGFloat = 4
+    private static let minimumWindowWidth: CGFloat = 110
+    private static let sidebarColor = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor.black.withAlphaComponent(0.2)
+            : NSColor.black.withAlphaComponent(0.06)
+    })
+
+    /// The sidebar in window coordinates: inset on three sides, 40% of the
+    /// window wide within 60 to 72 points. Nil in windows too narrow for one.
+    static func sidebar(in size: CGSize) -> CGRect? {
+        guard size.width >= minimumWindowWidth else { return nil }
+        let width = min(72, max(60, (size.width * 0.4).rounded()))
+        return CGRect(x: inset, y: inset, width: width, height: size.height - inset * 2)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
+                .fill(Color(nsColor: .windowBackgroundColor))
+            if let sidebar = Self.sidebar(in: size) {
+                // Concentric with the window's corners.
+                RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius - Self.inset)
+                    .fill(Self.sidebarColor)
+                    .frame(width: sidebar.width, height: sidebar.height)
+                    .offset(x: sidebar.minX, y: sidebar.minY)
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 }

@@ -423,9 +423,7 @@ struct CatalogFramePreview: View {
 
     private func framed(size: CGSize, window: CGRect, image: NSImage?) -> some View {
         ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
-                .fill(Color(nsColor: .windowBackgroundColor))
-                .frame(width: window.width, height: window.height)
+            WindowSurface(size: window.size)
                 .offset(x: window.minX, y: window.minY)
             if let image {
                 Image(nsImage: image)
@@ -481,8 +479,8 @@ struct PlainWindowPreview<Buttons: View>: View {
     let buttons: Buttons
 
     var body: some View {
-        RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
-            .fill(Color(nsColor: .windowBackgroundColor))
+        let size = CGSize(width: previewSize.width - 24, height: previewSize.height - 24)
+        WindowSurface(size: size)
             .overlay(
                 RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
                     .stroke(Color.gray.opacity(0.4), lineWidth: 0.5)
@@ -490,7 +488,6 @@ struct PlainWindowPreview<Buttons: View>: View {
             .overlay(alignment: .topLeading) {
                 buttons.padding(8)
             }
-            .frame(width: previewSize.width - 24, height: previewSize.height - 24)
     }
 }
 
