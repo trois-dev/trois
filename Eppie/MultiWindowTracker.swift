@@ -29,8 +29,9 @@ class MultiWindowTracker {
     private var refreshWork: [CGWindowID: DispatchWorkItem] = [:]
     private var resizeFollowUps: [CGWindowID: DispatchWorkItem] = [:]
     private var reorderQueued = false
-    // The Dock's full-screen windows, one per display, on screen only during
-    // Mission Control and App Exposé. Their shown and hidden events hide borders.
+    // The Dock's full-screen windows, one per display. They come on screen for
+    // Mission Control and App Exposé but also when an auto-hidden Dock slides
+    // in, so a shown event only prompts a scan that looks for the shield below.
     private var dockWindows: Set<CGWindowID> = []
     private var lastDockEvent: CFAbsoluteTime = 0
     private var scanTimer: Timer?
@@ -69,6 +70,15 @@ class MultiWindowTracker {
     private static let reorderDelay: TimeInterval = 0.03
     // A scan's window list can predate a Dock event, so it only corrects state after this long.
     private static let dockEventGrace: CFAbsoluteTime = 0.5
+
+    // Bounds are global top-left, the same space as CGDisplayBounds.
+    private static func coversDisplay(_ bounds: CGRect) -> Bool {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return false }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return false }
+        return displays.prefix(Int(count)).contains { CGDisplayBounds($0) == bounds }
+    }
 
     init(allWindows: Bool) {
         self.allWindows = allWindows
@@ -205,9 +215,15 @@ class MultiWindowTracker {
 
     private func handle(event: UInt32, wid: CGWindowID) {
         if dockWindows.contains(wid) {
-            if event == WindowServerEvents.shown || event == WindowServerEvents.hidden {
+            if event == WindowServerEvents.hidden {
                 lastDockEvent = CFAbsoluteTimeGetCurrent()
-                BorderWindow.hiddenForMissionControl = event == WindowServerEvents.shown
+                BorderWindow.hiddenForMissionControl = false
+            } else if event == WindowServerEvents.shown {
+                // The shield can come on screen a moment after the Dock window.
+                queueScan()
+                for delay in [0.05, 0.15] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.scan() }
+                }
             }
             return
         }
@@ -402,7 +418,8 @@ class MultiWindowTracker {
         var candidates: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
         var newStack: [CGWindowID] = []
         var newFrames: [CGWindowID: CGRect] = [:]
-        var dockShown = false
+        var missionControlShown = false
+        let windowManagerPIDs = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.WindowManager").map(\.processIdentifier))
 
         for info in infoList {
             guard let wid = info[kCGWindowNumber as String] as? CGWindowID,
@@ -410,8 +427,15 @@ class MultiWindowTracker {
                   let layer = info[kCGWindowLayer as String] as? Int else {
                 continue
             }
-            if dockWindows.contains(wid) {
-                dockShown = true
+            if dockWindows.contains(wid) { continue }
+            // Mission Control and App Exposé put a full-screen shield from
+            // WindowManager just under the Dock. Window names need Screen
+            // Recording, so it's matched by owner, level and size instead.
+            if windowManagerPIDs.contains(pid), layer > 0,
+               let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+               let bounds = CGRect(dictionaryRepresentation: boundsDict),
+               Self.coversDisplay(bounds) {
+                missionControlShown = true
                 continue
             }
             // Skip system UI (layer != 0). Our overlays float, so this also
@@ -452,9 +476,9 @@ class MultiWindowTracker {
 
         stack = newStack
         frames = newFrames
-        // Catches a missed Dock event.
+        // A list read before a Dock hidden event may still show the shield.
         if CFAbsoluteTimeGetCurrent() - lastDockEvent > Self.dockEventGrace {
-            BorderWindow.hiddenForMissionControl = dockShown
+            BorderWindow.hiddenForMissionControl = missionControlShown
         }
         // Windows in motion have fresher frames from their events.
         for wid in settleWork.keys {
