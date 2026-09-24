@@ -1,9 +1,10 @@
-// Lays out and draws Kaleidoscope 2 window frames around windows of any size.
+// Lays out and draws Kaleidoscope window frames around windows of any size.
 import Cocoa
 
 /// A Kaleidoscope 2 document window: the active, inactive and pressed-widget
 /// images plus the wnd# layout that says how to stretch them. Read from a
-/// theme's `frame/` folder (see kaleidoscope/tools/convert.py).
+/// theme's `frame/` folder (see kaleidoscope/tools/convert.py). A layout.json
+/// of {"format": "k1"} marks a 1.x scheme instead, drawn by WindowFrameK1.swift.
 ///
 /// All coordinates are image pixels with a top-left origin. One pixel draws as
 /// one point, the size these were made for.
@@ -13,6 +14,8 @@ struct WindowFrame {
     }
 
     let directory: URL
+    // Tells apart two reads of the same folder, whose files may have changed.
+    let identity = UUID()
     let active: CGImage
     let inactive: CGImage
     let pressed: CGImage?
@@ -24,12 +27,15 @@ struct WindowFrame {
     let bottom: [(Int, Int)]
     let left: [(Int, Int)]
     let right: [(Int, Int)]
+    // Set for 1.x schemes, which follow fixed rules instead of a layout.
+    let k1: K1Parts?
 
     var content: CGRect { rects[0] ?? CGRect(origin: .zero, size: size) }
 
     /// Space the frame adds around a window, in points.
     var insets: NSEdgeInsets {
-        NSEdgeInsets(top: content.minY, left: content.minX,
+        if k1 != nil { return Self.k1Insets }
+        return NSEdgeInsets(top: content.minY, left: content.minX,
                      bottom: size.height - content.maxY, right: size.width - content.maxX)
     }
 
@@ -40,9 +46,22 @@ struct WindowFrame {
         }
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("layout.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let layout = json["layout"] as? [String: Any],
               let active = image("active.png") else { return nil }
         self.directory = directory
+        if json["format"] as? String == "k1" {
+            guard active.width == 16, active.height == 16 else { return nil }
+            self.active = active
+            let inactive = image("inactive.png")
+            self.inactive = inactive?.width == 16 && inactive?.height == 16 ? inactive! : active
+            pressed = nil
+            size = CGSize(width: 16, height: 16)
+            rects = [:]
+            top = []; bottom = []; left = []; right = []
+            k1 = Self.loadK1Parts(frameDirectory: directory, image: image)
+            return
+        }
+        guard let layout = json["layout"] as? [String: Any] else { return nil }
+        k1 = nil
         self.active = active
         self.inactive = image("inactive.png") ?? active
         self.pressed = image("pressed.png")
@@ -103,9 +122,11 @@ struct WindowFrame {
 
     /// Splits an edge list into drawn segments and places them along `length`
     /// points. Leading and trailing edge gaps keep their space; interior edge
-    /// parts are dropped. `titleWidth` is the space the title text needs.
-    private func layout(_ list: [(Int, Int)], extent: Int, length: Int,
-                        widgets: Set<Widget>, titleWidth: Int?) -> (segments: [Segment], lead: Int) {
+    /// parts are dropped. `drawsEnd` picks end edge parts, by source range,
+    /// that no other band draws, so they draw as fixed pieces instead.
+    /// `titleWidth` is the space the title text needs.
+    private func layout(_ list: [(Int, Int)], extent: Int, length: Int, widgets: Set<Widget>,
+                        titleWidth: Int?, drawsEnd: (Int, Int) -> Bool = { _, _ in false }) -> (segments: [Segment], lead: Int) {
         var all: [Segment] = []
         var position = 0
         for (code, border) in list {
@@ -113,6 +134,13 @@ struct WindowFrame {
             let end = min(max(border, position), extent)
             all.append(Segment(code: code, start: position, end: end))
             position = end
+        }
+        if let first = all.firstIndex(where: { $0.code != Part.edge && $0.length > 0 }),
+           let last = all.lastIndex(where: { $0.code != Part.edge && $0.length > 0 }) {
+            for i in all.indices where all[i].code == Part.edge && (i < first || i > last)
+                && drawsEnd(all[i].start, all[i].end) {
+                all[i] = Segment(code: Part.endCap, start: all[i].start, end: all[i].end)
+            }
         }
         let firstDrawn = all.firstIndex { $0.code != Part.edge && $0.length > 0 }
         let lead = firstDrawn.map { all[$0].start } ?? 0
@@ -225,15 +253,28 @@ struct WindowFrame {
     }
 
     // Top and bottom run the full frame width, left and right the full height.
+    //
+    // Edge parts at the ends of an edge list are usually drawn by another band,
+    // but two kinds are drawn by nothing else: a side's end part beside the
+    // content, e.g. a pillar running down to where the bottom band starts, and
+    // the bottom band's corners. They draw as fixed pieces. Other end parts,
+    // above the content or in the top corners, can hold widget art for windows
+    // that have those widgets, so they stay undrawn.
     private func sides(outer: CGSize, widgets: Set<Widget>, titleWidth: CGFloat?) -> Sides {
         let width = Int(outer.width), height = Int(outer.height)
         let imageWidth = Int(size.width), imageHeight = Int(size.height)
+        let content = self.content
+        let besideContent = { (start: Int, end: Int) in start >= Int(content.minY) && end <= Int(content.maxY) }
+        let bottomCorner = { (start: Int, end: Int) in end <= Int(content.minX) || start >= Int(content.maxX) }
         return Sides(
             top: layout(top, extent: imageWidth, length: width, widgets: widgets,
                         titleWidth: titleWidth.map { Int(ceil($0)) }).segments,
-            bottom: layout(bottom, extent: imageWidth, length: width, widgets: widgets, titleWidth: nil).segments,
-            left: layout(left, extent: imageHeight, length: height, widgets: widgets, titleWidth: nil).segments,
-            right: layout(right, extent: imageHeight, length: height, widgets: widgets, titleWidth: nil).segments
+            bottom: layout(bottom, extent: imageWidth, length: width, widgets: widgets, titleWidth: nil,
+                           drawsEnd: bottomCorner).segments,
+            left: layout(left, extent: imageHeight, length: height, widgets: widgets, titleWidth: nil,
+                         drawsEnd: besideContent).segments,
+            right: layout(right, extent: imageHeight, length: height, widgets: widgets, titleWidth: nil,
+                          drawsEnd: besideContent).segments
         )
     }
 
@@ -297,6 +338,10 @@ struct WindowFrame {
     /// against the frame's square opening are filled in.
     func render(windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>,
                 title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat) -> (CGImage, Layout)? {
+        if let k1 {
+            return renderK1(k1, windowSize: windowSize, active: isActive, widgets: widgets, title: title,
+                            pressedWidget: pressedWidget, cornerRadius: cornerRadius, scale: scale)
+        }
         let titleAttributes = titleAttributes(active: isActive)
         let titleWidth = title.map { ($0 as NSString).size(withAttributes: titleAttributes).width + 8 }
         let layout = layout(windowSize: windowSize, widgets: widgets, titleWidth: titleWidth)
@@ -356,7 +401,7 @@ struct WindowFrame {
     /// Rects covering every point where the frame drew something, found by
     /// sampling the rendered pixels once per point. Runs on each row merge
     /// with identical runs on the rows below.
-    private func drawnShape(of context: CGContext, scale: CGFloat, size: CGSize, hole: CGRect) -> [CGRect] {
+    func drawnShape(of context: CGContext, scale: CGFloat, size: CGSize, hole: CGRect) -> [CGRect] {
         guard let data = context.data?.assumingMemoryBound(to: UInt8.self) else { return [] }
         let bytesPerRow = context.bytesPerRow
         let width = Int(size.width), height = Int(size.height)
@@ -487,7 +532,7 @@ struct WindowFrame {
         return luma < 128
     }
 
-    private func drawTitle(_ title: String, in rect: CGRect, attributes: [NSAttributedString.Key: Any], context: CGContext) {
+    func drawTitle(_ title: String, in rect: CGRect, attributes: [NSAttributedString.Key: Any], context: CGContext) {
         let graphics = NSGraphicsContext(cgContext: context, flipped: true)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = graphics
@@ -550,7 +595,7 @@ struct WindowFrame {
     }
 
     /// Draws a top-left-origin `source` rect of `image` into a top-left-origin `dest`.
-    private func draw(_ image: CGImage, source: CGRect, in dest: CGRect, context: CGContext) {
+    func draw(_ image: CGImage, source: CGRect, in dest: CGRect, context: CGContext) {
         guard let crop = image.cropping(to: source) else { return }
         context.saveGState()
         // CGContext.draw expects bottom-up; flip locally around the tile.
