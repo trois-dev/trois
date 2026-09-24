@@ -10,8 +10,10 @@ import Cocoa
 // - The title bar is 22 points: icon rows 0-2, row 3 stretched, rows 4-5.
 //   Row 3 also holds the title color (columns 7-8) and the emboss color
 //   (column 9, unused when it matches the background in column 6).
-// - Active windows tile the racing stripes icon across rows 4-16, 3 points
-//   clear of the widgets and 6 points clear of the title. Unmasked stripe
+// - Active windows stretch the racing stripes icon across rows 4-16, 3 points
+//   clear of the widgets and 6 points clear of the title: its left and right
+//   halves draw as-is and the middle column stretches between them, like the
+//   other stretched icons. Only utility windows tile it. Unmasked stripe
 //   pixels show the stripes pattern, if any.
 // - Widgets are 16x16 icons: close at (4, 4), windowshade flush right 1 point
 //   from the edge, zoom just left of it. Inactive windows show no stripes and
@@ -124,28 +126,16 @@ extension WindowFrame {
 
         if isActive, let stripes = parts.stripes, stripeEnd > stripeStart {
             let band = CGRect(x: stripeStart, y: Self.k1StripeTop, width: stripeEnd - stripeStart, height: CGFloat(stripes.height))
-            context.saveGState()
+            var pieces = [band]
             if let titleRect {
-                // Stripes stop short of the title on both sides.
-                let gap = titleRect.insetBy(dx: -Self.k1TitleGap, dy: -20)
-                context.addRect(band)
-                context.addRect(gap.intersection(band))
-                context.clip(using: .evenOdd)
-            } else {
-                context.clip(to: band)
+                // Stripes stop short of the title on both sides, each piece with its own ends.
+                let gap = titleRect.insetBy(dx: -Self.k1TitleGap, dy: 0)
+                pieces = [CGRect(x: band.minX, y: band.minY, width: gap.minX - band.minX, height: band.height),
+                          CGRect(x: gap.maxX, y: band.minY, width: band.maxX - gap.maxX, height: band.height)]
             }
-            let tileW = CGFloat(stripes.width), tileH = CGFloat(stripes.height)
-            var x = band.minX
-            while x < band.maxX {
-                let tile = CGRect(x: x, y: band.minY, width: tileW, height: tileH)
-                if let pattern = parts.stripesPattern {
-                    // The pattern shows through the stripes' unmasked pixels.
-                    tilePattern(pattern, in: tile, context: context)
-                }
-                draw(stripes, source: CGRect(x: 0, y: 0, width: tileW, height: tileH), in: tile, context: context)
-                x += tileW
+            for piece in pieces where piece.width > 0 {
+                drawK1Stripes(stripes, pattern: parts.stripesPattern, in: piece, context: context)
             }
-            context.restoreGState()
         }
 
         for (widget, rect) in widgetRects {
@@ -167,6 +157,26 @@ extension WindowFrame {
         var layout = Layout(size: size, widgets: widgetRects, title: titleRect)
         layout.shape = drawnShape(of: context, scale: scale, size: size, hole: hole)
         return (result, layout)
+    }
+
+    /// Draws the left half of the stripes icon at the start of `rect`, the right
+    /// half at its end, and stretches the middle column between them.
+    private func drawK1Stripes(_ stripes: CGImage, pattern: CGImage?, in rect: CGRect, context: CGContext) {
+        context.saveGState()
+        context.clip(to: rect)
+        if let pattern {
+            // The pattern shows through the stripes' unmasked pixels.
+            tilePattern(pattern, in: rect, context: context)
+        }
+        let h = CGFloat(stripes.height)
+        let mid = CGFloat(stripes.width / 2), rightW = CGFloat(stripes.width) - mid - 1
+        draw(stripes, source: CGRect(x: 0, y: 0, width: mid, height: h),
+             in: CGRect(x: rect.minX, y: rect.minY, width: mid, height: h), context: context)
+        draw(stripes, source: CGRect(x: mid, y: 0, width: 1, height: h),
+             in: CGRect(x: rect.minX + mid, y: rect.minY, width: max(0, rect.width - mid - rightW), height: h), context: context)
+        draw(stripes, source: CGRect(x: mid + 1, y: 0, width: rightW, height: h),
+             in: CGRect(x: rect.maxX - rightW, y: rect.minY, width: rightW, height: h), context: context)
+        context.restoreGState()
     }
 
     private func tilePattern(_ pattern: CGImage, in rect: CGRect, context: CGContext) {

@@ -246,16 +246,16 @@ struct WindowFrame {
             segments[i].outLength = segments[i].length
         }
 
-        // Grow regions share what's left equally. Period repeats only take
-        // whole periods; fills and the first stretch take the remainder.
+        // Grow regions share what's left equally, the odd points going to the
+        // last ones, as Kaleidoscope did. Period repeats only take whole
+        // periods; fills and the first stretch take the remainder.
         let grows = segments.indices.filter { Part.grows.contains(segments[$0].code) }
         var leftover = max(0, spare)
         if !grows.isEmpty {
             let share = leftover / grows.count
-            var extra = leftover - share * grows.count
-            for i in grows {
-                var give = share + (extra > 0 ? 1 : 0)
-                extra = max(0, extra - 1)
+            let extra = leftover - share * grows.count
+            for (n, i) in grows.enumerated() {
+                var give = share + (n >= grows.count - extra ? 1 : 0)
                 if segments[i].code == Part.period {
                     give = give / segments[i].length * segments[i].length
                 }
