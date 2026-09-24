@@ -98,6 +98,9 @@ class ThemeManager: ObservableObject {
 
     @Published var themes: [Theme] = []
     @Published var currentTheme: Theme?
+    // The Editor tab's undo and redo history, as copies of the draft folder.
+    @Published var draftUndo: [URL] = []
+    @Published var draftRedo: [URL] = []
 
     let themesDirectory: URL
     let fileManager = FileManager.default
@@ -162,11 +165,14 @@ class ThemeManager: ObservableObject {
         (\.helpUp, ["helpup", "help up", "help button up", "1helpup"])
     ]
 
-    init() {
+    /// `directory` is for tests; the app uses Application Support.
+    init(directory: URL? = nil) {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        themesDirectory = appSupport.appendingPathComponent("Trois/Themes", isDirectory: true)
+        themesDirectory = directory ?? appSupport.appendingPathComponent("Trois/Themes", isDirectory: true)
 
         try? fileManager.createDirectory(at: themesDirectory, withIntermediateDirectories: true)
+        // Undo history doesn't outlive a launch.
+        try? fileManager.removeItem(at: draftHistoryDirectory)
 
         loadThemes()
         loadCurrentTheme()

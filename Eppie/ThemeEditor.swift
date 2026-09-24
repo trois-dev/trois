@@ -159,9 +159,6 @@ struct ThemeEditorView: View {
     // Run to select once a click on another side changes the selection.
     @State private var pendingRun: Int?
     @State private var canvasMode = CanvasMode.preview
-    // Edge edits to undo and redo, as each side's runs before the edit.
-    @State private var undoStack: [(WindowFrame.Side, [[Int]])] = []
-    @State private var redoStack: [(WindowFrame.Side, [[Int]])] = []
     // Bumped when the draft changes, so images are read from disk again.
     @State private var revision = 0
     @State private var renderCache = FrameRenderCache()
@@ -190,7 +187,6 @@ struct ThemeEditorView: View {
                     Button("Keep Editing") { themeManager.resumeDraft() }
                     Button("Start Over", role: .destructive) {
                         discardTitleEdit()
-                        clearUndo()
                         themeManager.discardDraft()
                         reload()
                     }
@@ -331,9 +327,18 @@ struct ThemeEditorView: View {
         HStack(spacing: 12) {
             Button("Reset All") {
                 discardTitleEdit()
-                clearUndo()
                 themeManager.resetDraft()
             }
+            // Text fields on the Theme part keep Command-Z for their own typing.
+            let shortcuts = selection != .theme
+            Button(action: undo) { Image(systemName: "arrow.uturn.backward") }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut("z") : nil)
+                .disabled(themeManager.draftUndo.isEmpty)
+                .help("Undo")
+            Button(action: redo) { Image(systemName: "arrow.uturn.forward") }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut("z", modifiers: [.command, .shift]) : nil)
+                .disabled(themeManager.draftRedo.isEmpty)
+                .help("Redo")
             if frame != nil {
                 FrameOptionToggles()
             }
@@ -712,28 +717,21 @@ struct ThemeEditorView: View {
             previewFrame = nil
             return
         }
-        let before = frame.runs(side).map { [$0.0, $0.1] }
         if let problem = themeManager.setDraftEdgeRuns(runs, for: side) {
             previewFrame = nil
             report(problem)
-            return
         }
-        undoStack.append((side, before))
-        redoStack.removeAll()
     }
 
+    // A title edit still waiting to be written is dropped, since undo steps past it.
     private func undo() {
-        guard let (side, runs) = undoStack.popLast(), let frame else { return }
-        redoStack.append((side, frame.runs(side).map { [$0.0, $0.1] }))
-        selection = .edge(side)
-        report(themeManager.setDraftEdgeRuns(runs.map { ($0[0], $0[1]) }, for: side))
+        discardTitleEdit()
+        themeManager.undoDraftEdit()
     }
 
     private func redo() {
-        guard let (side, runs) = redoStack.popLast(), let frame else { return }
-        undoStack.append((side, frame.runs(side).map { [$0.0, $0.1] }))
-        selection = .edge(side)
-        report(themeManager.setDraftEdgeRuns(runs.map { ($0[0], $0[1]) }, for: side))
+        discardTitleEdit()
+        themeManager.redoDraftEdit()
     }
 
     // MARK: - Title edits
@@ -761,13 +759,7 @@ struct ThemeEditorView: View {
 
     private func useFrame(from directory: URL?) {
         discardTitleEdit()
-        clearUndo()
         report(themeManager.useDraftFrame(from: directory))
-    }
-
-    private func clearUndo() {
-        undoStack.removeAll()
-        redoStack.removeAll()
     }
 
     // MARK: - Inspector
@@ -793,8 +785,6 @@ struct ThemeEditorView: View {
                 EdgeInspector(side: side, frame: previewFrame ?? frame, selected: $selectedRun,
                               selectSide: { selection = .edge($0) },
                               changed: themeManager.draftEdgeRunsChanged(side),
-                              canUndo: !undoStack.isEmpty, canRedo: !redoStack.isEmpty,
-                              undo: undo, redo: redo,
                               revert: { themeManager.revertDraftEdgeRuns(side) },
                               commit: { commit($0, side: side) })
             } else {
@@ -1163,10 +1153,6 @@ private struct EdgeInspector: View {
     @Binding var selected: Int
     let selectSide: (WindowFrame.Side) -> Void
     let changed: Bool
-    let canUndo: Bool
-    let canRedo: Bool
-    let undo: () -> Void
-    let redo: () -> Void
     let revert: () -> Void
     let commit: ([(Int, Int)]) -> Void
 
@@ -1194,14 +1180,6 @@ private struct EdgeInspector: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
             Spacer()
-            Button(action: undo) { Image(systemName: "arrow.uturn.backward") }
-                .keyboardShortcut("z")
-                .disabled(!canUndo)
-                .help("Undo")
-            Button(action: redo) { Image(systemName: "arrow.uturn.forward") }
-                .keyboardShortcut("z", modifiers: [.command, .shift])
-                .disabled(!canRedo)
-                .help("Redo")
             Button("Revert Edge", action: revert)
                 .disabled(!changed)
                 .help("Put this edge back as it was when the frame came in")
@@ -1701,7 +1679,7 @@ private struct TitleInspector: View {
                     .labelsHidden()
                     .fixedSize()
                     Stepper(value: size, in: TitleStyle.sizes) {
-                        Text("\(Int(size.wrappedValue)) pt").monospacedDigit()
+                        Text("\(size.wrappedValue.formatted()) pt").monospacedDigit()
                     }
                     Picker("Alignment", selection: alignment) {
                         Label("Left", systemImage: "text.alignleft").tag(TitleStyle.Alignment.left)
@@ -1712,7 +1690,10 @@ private struct TitleInspector: View {
                     .labelStyle(.iconOnly)
                     .labelsHidden()
                     .fixedSize()
-                    .help("Where the title sits in its space")
+                    // 2.x titles get a section just wide enough for the text, so only 1.x bars leave room to align in.
+                    .disabled(frame.k1 == nil && style.alignment == nil)
+                    .help(frame.k1 == nil ? "2.x frames size the title's section to the text, so it stays centered"
+                                          : "Where the title sits in its space")
                 }
             }
             GridRow {

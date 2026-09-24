@@ -92,6 +92,7 @@ extension ThemeManager {
             if draftHasUnsavedEdits { return true }
         }
         snapshotLiveIntoDraft()
+        clearDraftHistory()
         return false
     }
 
@@ -103,11 +104,67 @@ extension ThemeManager {
     /// Drops the draft's edits and starts again from what's live.
     func discardDraft() {
         snapshotLiveIntoDraft()
+        clearDraftHistory()
+    }
+
+    // MARK: - Undo
+
+    var draftHistoryDirectory: URL {
+        themesDirectory.appendingPathComponent(".draft-history", isDirectory: true)
+    }
+    private static let maxDraftHistory = 50
+
+    /// Copies the draft aside before an edit, so the edit can be undone.
+    private func recordDraftEdit() {
+        guard fileManager.fileExists(atPath: draftDirectory.path), let copy = copyDraft() else { return }
+        draftUndo.append(copy)
+        if draftUndo.count > Self.maxDraftHistory {
+            try? fileManager.removeItem(at: draftUndo.removeFirst())
+        }
+        draftRedo.forEach { try? fileManager.removeItem(at: $0) }
+        draftRedo.removeAll()
+    }
+
+    private func copyDraft() -> URL? {
+        let copy = draftHistoryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: draftHistoryDirectory, withIntermediateDirectories: true)
+            try fileManager.copyItem(at: draftDirectory, to: copy)
+            return copy
+        } catch {
+            return nil
+        }
+    }
+
+    func undoDraftEdit() {
+        guard !draftUndo.isEmpty, let current = copyDraft() else { return }
+        draftRedo.append(current)
+        restoreDraft(from: draftUndo.removeLast())
+    }
+
+    func redoDraftEdit() {
+        guard !draftRedo.isEmpty, let current = copyDraft() else { return }
+        draftUndo.append(current)
+        restoreDraft(from: draftRedo.removeLast())
+    }
+
+    private func restoreDraft(from copy: URL) {
+        try? fileManager.removeItem(at: draftDirectory)
+        try? fileManager.moveItem(at: copy, to: draftDirectory)
+        draftHasUnsavedEdits = true
+        applyTheme(draftTheme())
+    }
+
+    private func clearDraftHistory() {
+        try? fileManager.removeItem(at: draftHistoryDirectory)
+        draftUndo.removeAll()
+        draftRedo.removeAll()
     }
 
     /// Clears every image and frame, live and in the draft. The theme's
     /// name and other info stay.
     func resetDraft() {
+        recordDraftEdit()
         let info = draftInfo()
         clearTheme()
         snapshotLiveIntoDraft()
@@ -155,6 +212,7 @@ extension ThemeManager {
             do { data = try Data(contentsOf: source) } catch { return "Couldn't read the image. \(error.localizedDescription)" }
         }
 
+        recordDraftEdit()
         var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
         if let source, let data {
             // The new file is written before the old one goes, so a failed write loses nothing.
@@ -192,6 +250,7 @@ extension ThemeManager {
     /// generated, so they follow later changes to it.
     func generateDraftImages(forKeys defaultsKeys: [String]) {
         ensureDraft()
+        recordDraftEdit()
         var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
         let keys = defaultsKeys.compactMap { key in ButtonSlot.all.first { $0.defaultsKey == key }?.manifestKey }
         let made = keys.filter { regenerate($0, in: &manifest) }
@@ -213,6 +272,7 @@ extension ThemeManager {
     @discardableResult
     func setDraftFrameArt(_ source: URL?, for art: FrameArt) -> String? {
         guard let frame = draftFrameDirectory else { return "This theme has no window frame." }
+        recordDraftEdit()
         let destination = frame.appendingPathComponent(art.fileName)
         var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
         unmarkGenerated(art.generatedKey, in: &manifest)
@@ -244,6 +304,7 @@ extension ThemeManager {
     /// marks it generated.
     func generateDraftFrameArt(_ art: FrameArt) {
         guard art != .active, draftFrameDirectory != nil else { return }
+        recordDraftEdit()
         var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
         makeFrameArt(art, manifest: &manifest)
         saveDraft(manifest)
@@ -259,6 +320,7 @@ extension ThemeManager {
     @discardableResult
     func useDraftFrame(from directory: URL?) -> String? {
         ensureDraft()
+        recordDraftEdit()
         let frame = draftDirectory.appendingPathComponent("frame", isDirectory: true)
         // Copied beside the old frame first, so a failed copy keeps it.
         let incoming = draftDirectory.appendingPathComponent(".frame-new", isDirectory: true)
@@ -290,6 +352,7 @@ extension ThemeManager {
     /// Cuts the close, minimize and zoom images out of the frame art.
     func takeButtonsFromFrame() {
         guard let directory = draftFrameDirectory, let frame = WindowFrame(directory: directory) else { return }
+        recordDraftEdit()
         var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
         for mirror in Self.frameMirrors {
             guard let art = frameImage(mirror.art), let rect = sourceRect(mirror, in: frame),
@@ -303,6 +366,7 @@ extension ThemeManager {
 
     /// Paints the close, minimize and zoom images into the frame art.
     func putButtonsInFrame() {
+        recordDraftEdit()
         var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
         pushToFrame(Self.frameMirrors.map(\.key), manifest: &manifest)
         saveDraft(manifest)
@@ -321,6 +385,7 @@ extension ThemeManager {
         }
         guard frame.k1 == nil else { return "1.x frames have a fixed layout." }
         if let error = WindowFrame.runError(runs, extent: frame.extent(side)) { return error }
+        recordDraftEdit()
         saveLayoutBaseline()
         guard WindowFrame.writeRuns(runs, for: side, in: directory) else { return "Couldn't write the layout." }
         saveDraft(readManifest(in: draftDirectory) ?? ThemeManifest())
@@ -352,6 +417,7 @@ extension ThemeManager {
     @discardableResult
     func setDraftTitleStyle(_ style: TitleStyle) -> String? {
         guard let directory = draftFrameDirectory else { return "This theme has no window frame." }
+        recordDraftEdit()
         saveLayoutBaseline()
         guard WindowFrame.writeTitleStyle(style, in: directory) else { return "Couldn't write the layout." }
         saveDraft(readManifest(in: draftDirectory) ?? ThemeManifest())
