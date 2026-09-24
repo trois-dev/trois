@@ -1,4 +1,4 @@
-// Custom tab: a live preview of the draft theme to click, drop images on and edit.
+// Editor tab: a live preview of the draft theme to click, drop images on and edit.
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -41,8 +41,12 @@ enum EditorButton: String, CaseIterable, Identifiable {
 }
 
 enum EditorPart: Hashable {
+    // The theme's name, author and other info.
+    case theme
     case button(EditorButton)
     case frame
+    // One edge list of a frame, for editing its runs.
+    case edge(WindowFrame.Side)
 }
 
 enum PreviewState: String, CaseIterable, Identifiable {
@@ -139,14 +143,23 @@ struct ThemeEditorView: View {
     @ObservedObject private var themeManager = ThemeManager.shared
     @AppStorage("windowBorders") private var windowBorders = true
     @AppStorage("frameButtons") private var frameButtons = false
-    @AppStorage("customThemeName") private var themeName = ""
-    @AppStorage("customThemeAuthor") private var themeAuthor = ""
 
     @State private var selection: EditorPart = .button(.close)
     @State private var state: PreviewState = .active
     @State private var windowSize = CGSize(width: 320, height: 110)
     @State private var dragStart: CGSize?
     @State private var frame: WindowFrame?
+    // The frame with an edge edit still being dragged, drawn in its place.
+    @State private var previewFrame: WindowFrame?
+    @State private var info = DraftInfo()
+    // The run picked in the edge inspector, highlighted in the preview.
+    @State private var selectedRun = 0
+    // Run to select once a click on another side changes the selection.
+    @State private var pendingRun: Int?
+    @State private var canvasMode = CanvasMode.preview
+    // Edge edits to undo and redo, as each side's runs before the edit.
+    @State private var undoStack: [(WindowFrame.Side, [[Int]])] = []
+    @State private var redoStack: [(WindowFrame.Side, [[Int]])] = []
     // Bumped when the draft changes, so images are read from disk again.
     @State private var revision = 0
     @State private var renderCache = FrameRenderCache()
@@ -183,8 +196,9 @@ struct ThemeEditorView: View {
                 save()
             }
         }) {
-            SaveThemeSheet(name: $themeName, author: $themeAuthor) { pendingSave = true }
+            SaveThemeSheet(name: $info.name, author: $info.author) { pendingSave = true }
         }
+        .onChange(of: info) { themeManager.setDraftInfo($0) }
         .alert(alert?.title ?? "", isPresented: Binding(
             get: { alert != nil },
             set: { if !$0 { alert = nil } }
@@ -197,17 +211,24 @@ struct ThemeEditorView: View {
 
     private func reload() {
         frame = themeManager.draftFrameDirectory.flatMap { WindowFrame(directory: $0) }
+        previewFrame = nil
+        info = themeManager.draftInfo()
         checks = themeManager.draftChecks()
         revision += 1
+        fitSelection()
     }
 
     // MARK: - Toolbar and footer
 
     private var toolbar: some View {
         HStack {
-            Picker("Part", selection: $selection) {
+            Picker("Part", selection: partBinding) {
                 // Icons keep both pickers on one row; the titles stay for
                 // tooltips and VoiceOver.
+                Label("Theme", systemImage: "info.circle")
+                    .labelStyle(.iconOnly)
+                    .help("Theme")
+                    .tag(EditorPart.theme)
                 ForEach(EditorButton.allCases) { button in
                     Label(button.title, systemImage: button.symbol)
                         .labelStyle(.iconOnly)
@@ -225,41 +246,63 @@ struct ThemeEditorView: View {
 
             Spacer()
 
-            Picker("State", selection: $state) {
-                ForEach(PreviewState.allCases) { state in
-                    Text(state.rawValue).tag(state)
-                        .disabled(!availableStates.contains(state))
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
+            SegmentedControl(items: PreviewState.allCases.map { ($0, $0.rawValue) },
+                             selection: $state, enabled: Set(availableStates))
+                .fixedSize()
         }
-        .onChange(of: selection) { _ in fitState() }
-        .onChange(of: frame?.identity) { _ in fitState() }
+        .onChange(of: selection) { _ in
+            selectedRun = pendingRun ?? 0
+            pendingRun = nil
+            fitState()
+        }
+        .onChange(of: state) { _ in fitState() }
     }
 
-    // States the selected part has art for. Frames have no hover art, and
-    // 1.x frames no pressed strip.
-    private var availableStates: [PreviewState] {
-        switch selection {
-        case .button: return PreviewState.allCases
-        case .frame: return frame?.k1 == nil ? [.active, .pressed, .inactive] : [.active, .inactive]
+    // An edge shows as the Frame segment.
+    private var partBinding: Binding<EditorPart> {
+        Binding(get: { if case .edge = selection { return .frame }; return selection },
+                set: { selection = $0 })
+    }
+
+    private func select(_ side: WindowFrame.Side, run: Int) {
+        if selection == .edge(side) {
+            selectedRun = run
+        } else {
+            pendingRun = run
+            selection = .edge(side)
         }
     }
+
+    // States a part has art for. Frames have no hover art, and 1.x frames no
+    // pressed strip.
+    private func states(for part: EditorPart) -> [PreviewState] {
+        switch part {
+        case .theme, .button: return PreviewState.allCases
+        case .frame, .edge: return frame?.k1 == nil ? [.active, .pressed, .inactive] : [.active, .inactive]
+        }
+    }
+
+    private var availableStates: [PreviewState] { states(for: selection) }
 
     private func fitState() {
         if !availableStates.contains(state) { state = .active }
     }
 
+    // Edges only exist on frames with a layout.
+    private func fitSelection() {
+        if case .edge = selection, frame == nil || frame?.k1 != nil { selection = .frame }
+        fitState()
+    }
+
     private var footer: some View {
         HStack(spacing: 12) {
             Button("Reset All") {
+                clearUndo()
                 themeManager.resetDraft()
             }
             if frame != nil {
-                Toggle("Window Borders", isOn: $windowBorders)
-                Toggle("Buttons in Frame", isOn: $frameButtons)
+                Toggle("Window borders", isOn: $windowBorders)
+                Toggle("Buttons in frame", isOn: $frameButtons)
                     .disabled(!windowBorders)
                     .help("Put the close, zoom and minimize buttons in the frame instead of at the traffic lights")
             }
@@ -280,7 +323,7 @@ struct ThemeEditorView: View {
             Button("Save as Theme...") {
                 showingSave = true
             }
-            .disabled(!hasCustomImages)
+            .disabled(!hasCustomImages && frame == nil)
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
@@ -298,13 +341,13 @@ struct ThemeEditorView: View {
     }
 
     private func save() {
-        let name = themeName.isEmpty ? "Custom Theme" : themeName
-        let author = themeAuthor.isEmpty ? nil : themeAuthor
-        if let path = themeManager.saveCustomTheme(name: name, author: author) {
+        // The sheet's edits may not have reached the draft yet.
+        themeManager.setDraftInfo(info)
+        if let path = themeManager.saveCustomTheme() {
             themeManager.loadThemes()
             alert = ("Theme Saved", "Theme saved to:\n\(path)")
         } else {
-            alert = ("Theme Not Saved", "Make sure you have at least one custom image.")
+            alert = ("Theme Not Saved", "Make sure you have a custom image or a frame.")
         }
     }
 
@@ -314,9 +357,9 @@ struct ThemeEditorView: View {
 
     // MARK: - Canvas
 
-    private var shownFrame: WindowFrame? { windowBorders ? frame : nil }
+    private var shownFrame: WindowFrame? { windowBorders ? previewFrame ?? frame : nil }
     private var showsFrameButtons: Bool { frameButtons && shownFrame != nil }
-    private var title: String { themeName.isEmpty ? "Untitled" : themeName }
+    private var title: String { info.name.isEmpty ? "Untitled" : info.name }
 
     // The button the Pressed state presses.
     private var pressedButton: EditorButton {
@@ -324,7 +367,60 @@ struct ThemeEditorView: View {
         return .close
     }
 
+    private enum CanvasMode { case preview, slices }
+
+    // Slices only edits frames with a layout, and only while the frame or
+    // one of its edges is selected.
+    private var showsSlices: Bool {
+        guard canvasMode == .slices, let frame, frame.k1 == nil else { return false }
+        switch selection {
+        case .frame, .edge: return true
+        case .theme, .button: return false
+        }
+    }
+
+    private var canvasToggleShown: Bool {
+        guard let frame, frame.k1 == nil else { return false }
+        switch selection {
+        case .frame, .edge: return true
+        case .theme, .button: return false
+        }
+    }
+
     private var canvas: some View {
+        ZStack(alignment: .topLeading) {
+            if showsSlices, let frame {
+                slices(frame)
+            } else {
+                previewCanvas
+            }
+            if canvasToggleShown {
+                Picker("View", selection: $canvasMode) {
+                    Label("Preview", systemImage: "macwindow").labelStyle(.iconOnly).help("Preview").tag(CanvasMode.preview)
+                    Label("Slices", systemImage: "square.grid.3x3").labelStyle(.iconOnly).help("Slices: edit how the art is cut").tag(CanvasMode.slices)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .padding(8)
+            }
+        }
+    }
+
+    private func slices(_ frame: WindowFrame) -> some View {
+        let shown = previewFrame ?? frame
+        let side: WindowFrame.Side? = { if case .edge(let s) = selection { return s }; return nil }()
+        let size = CanvasGeometry(bounds: CGSize(width: 4000, height: 4000), requested: windowSize, insets: shown.insets).window.size
+        return SlicesView(frame: frame, shown: shown, selectedSide: side, selectedRun: selectedRun,
+                          inactive: state == .inactive, thumbnail: rendered(shown, windowSize: size),
+                          select: { select($0, run: $1) }, preview: { previewFrame = $0 },
+                          commit: { commit($0, side: $1) }, showPreview: { canvasMode = .preview })
+            .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                loadDroppedFile(providers) { url in drop(url, on: selection) }
+            }
+    }
+
+    private var previewCanvas: some View {
         GeometryReader { geo in
             let unplaced = CanvasGeometry(bounds: geo.size, requested: windowSize, insets: shownFrame?.insets)
             // The render only depends on the window's size, so it can place the window.
@@ -333,6 +429,9 @@ struct ThemeEditorView: View {
             ZStack(alignment: .topLeading) {
                 Color.gray.opacity(0.18)
                 windowView(g, rendered: rendered)
+                if case .edge(let side) = selection, let rendered {
+                    runOverlay(side, g, rendered: rendered)
+                }
                 selectionOutline(g, rendered: rendered)
                 grip(g)
             }
@@ -385,8 +484,12 @@ struct ThemeEditorView: View {
     private func selectionOutline(_ g: CanvasGeometry, rendered: RenderedFrame?) -> some View {
         var rects: [CGRect] = []
         switch selection {
+        case .theme:
+            break
         case .frame:
             if rendered != nil { rects.append(g.visible.insetBy(dx: -3, dy: -3)) }
+        case .edge(let side):
+            if rendered != nil { rects.append(band(side, g).insetBy(dx: -1, dy: -1)) }
         case .button(let button):
             if let placed = placedButtons(in: g).first(where: { $0.button == button }) {
                 rects.append(placed.rect.insetBy(dx: -2, dy: -2))
@@ -430,12 +533,17 @@ struct ThemeEditorView: View {
 
     private func rendered(for g: CanvasGeometry) -> RenderedFrame? {
         guard let frame = shownFrame else { return nil }
-        let widgets: Set<WindowFrame.Widget> = showsFrameButtons ? Set(WindowFrame.Widget.allCases) : []
+        return rendered(frame, windowSize: g.window.size)
+    }
+
+    private func rendered(_ frame: WindowFrame, windowSize: CGSize) -> RenderedFrame? {
+        let all = Set(WindowFrame.Widget.allCases)
+        let widgets: Set<WindowFrame.Widget> = showsFrameButtons ? all : []
         let pressed = state == .pressed ? pressedButton.widget : nil
-        let key = "\(frame.identity)|\(g.window.size)|\(state)|\(widgets.count)|\(String(describing: pressed))|\(title)"
+        let key = "\(frame.identity)|\(windowSize)|\(state)|\(widgets.count)|\(String(describing: pressed))|\(title)"
         if key == renderCache.key { return renderCache.value }
-        let value = frame.render(windowSize: g.window.size, active: state != .inactive, widgets: widgets,
-                                 title: title, pressedWidget: pressed,
+        let value = frame.render(windowSize: windowSize, active: state != .inactive, widgets: widgets,
+                                 hidden: all.subtracting(widgets), title: title, pressedWidget: pressed,
                                  cornerRadius: BorderWindow.fallbackCornerRadius, scale: 2)
             .map { RenderedFrame(image: $0.0, layout: $0.1) }
         renderCache.key = key
@@ -468,8 +576,10 @@ struct ThemeEditorView: View {
     private func buttonImage(_ button: EditorButton) -> NSImage? {
         let defaults = UserDefaults.standard
         let suffix = state == .pressed && button != pressedButton ? "" : state.buttonSuffix
-        return pixelImage(atPath: defaults.string(forKey: button.key(suffix)))
-            ?? pixelImage(atPath: defaults.string(forKey: button.key("")))
+        // Trimmed like the overlays, to the box all of the button's states share.
+        let suffixes = ["", "Hover", "Pressed", "Disabled"]
+        let images = ButtonArt.load(suffixes.map { defaults.string(forKey: button.key($0)) })
+        return suffixes.firstIndex(of: suffix).flatMap { images[$0] } ?? images[0]
     }
 
     private func part(at point: CGPoint, _ g: CanvasGeometry, rendered: RenderedFrame?) -> EditorPart? {
@@ -483,30 +593,169 @@ struct ThemeEditorView: View {
             }
         }
         if rendered != nil, g.visible.contains(point), !g.window.contains(point) {
-            return .frame
+            // Top and bottom draw over the sides, so they own the corners.
+            guard frame?.k1 == nil else { return .frame }
+            if point.y < g.window.minY { return .edge(.top) }
+            if point.y >= g.window.maxY { return .edge(.bottom) }
+            return .edge(point.x < g.window.minX ? .left : .right)
         }
         return nil
+    }
+
+    // Shows how the selected edge's runs drew at this window size: a box
+    // per piece, a tick where each tile repeats, and an outline for scaled
+    // pieces. Along a side edge everything runs top to bottom.
+    private func runOverlay(_ side: WindowFrame.Side, _ g: CanvasGeometry, rendered: RenderedFrame) -> some View {
+        let area = band(side, g)
+        let pieces = rendered.layout.runs[side] ?? []
+        func rect(_ start: CGFloat, _ length: CGFloat) -> CGRect {
+            side.horizontal
+                ? CGRect(x: g.outer.minX + start, y: area.minY, width: length, height: area.height)
+                : CGRect(x: area.minX, y: g.outer.minY + start, width: area.width, height: length)
+        }
+        return Canvas { context, _ in
+            for piece in pieces where piece.length > 0 {
+                let r = rect(piece.start, piece.length)
+                let selected = piece.run == selectedRun
+                let tint = RunMode.tint(piece.code)
+                context.fill(Path(r), with: .color(tint.opacity(selected ? 0.35 : 0.15)))
+                context.stroke(Path(r), with: .color(selected ? .accentColor : tint.opacity(0.8)),
+                               style: StrokeStyle(lineWidth: selected ? 1.5 : 0.5, dash: piece.code == WindowFrame.Part.scale ? [3, 2] : []))
+                // Tiles start at the run's start, or at its end for the from-end modes.
+                // Ticks for tiles narrower than 3 points would read as a solid fill.
+                guard RunMode.tiles(piece.code), piece.sourceLength >= 3 else { continue }
+                let step = CGFloat(piece.sourceLength)
+                let fromEnd = RunMode.fromEnd(piece.code)
+                var offset = step
+                var ticks = Path()
+                var count = 0
+                // One-pixel tiles would draw a tick per point; stop well before.
+                while offset < piece.length && count < 400 {
+                    count += 1
+                    let at = fromEnd ? piece.length - offset : offset
+                    let tick = rect(piece.start + at, 0)
+                    ticks.move(to: CGPoint(x: tick.minX, y: tick.minY))
+                    ticks.addLine(to: CGPoint(x: tick.maxX, y: tick.maxY))
+                    offset += step
+                }
+                context.stroke(ticks, with: .color(tint.opacity(0.9)), lineWidth: 0.5)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    // Where a side's band draws in the canvas.
+    private func band(_ side: WindowFrame.Side, _ g: CanvasGeometry) -> CGRect {
+        let o = g.outer, i = g.insets
+        switch side {
+        case .top: return CGRect(x: o.minX, y: o.minY, width: o.width, height: i.top)
+        case .bottom: return CGRect(x: o.minX, y: g.window.maxY, width: o.width, height: i.bottom)
+        case .left: return CGRect(x: o.minX, y: o.minY, width: i.left, height: o.height)
+        case .right: return CGRect(x: g.window.maxX, y: o.minY, width: i.right, height: o.height)
+        }
     }
 
     // A drop replaces the image for the part and the state being previewed.
     private func drop(_ url: URL, on part: EditorPart) {
         selection = part
+        // The part may not have art for the state being previewed.
+        let state = states(for: part).contains(self.state) ? self.state : .active
         switch part {
+        case .theme:
+            break
         case .button(let button):
             themeManager.setDraftImage(url, forKey: button.key(state.buttonSuffix))
-        case .frame:
+        case .frame, .edge:
             report(themeManager.setDraftFrameArt(url, for: state.frameArt))
         }
+    }
+
+    // MARK: - Edge edits
+
+    private func commit(_ runs: [(Int, Int)], side: WindowFrame.Side) {
+        guard let frame, !runs.elementsEqual(frame.runs(side), by: ==) else {
+            previewFrame = nil
+            return
+        }
+        let before = frame.runs(side).map { [$0.0, $0.1] }
+        if let problem = themeManager.setDraftEdgeRuns(runs, for: side) {
+            previewFrame = nil
+            report(problem)
+            return
+        }
+        undoStack.append((side, before))
+        redoStack.removeAll()
+    }
+
+    private func undo() {
+        guard let (side, runs) = undoStack.popLast(), let frame else { return }
+        redoStack.append((side, frame.runs(side).map { [$0.0, $0.1] }))
+        selection = .edge(side)
+        report(themeManager.setDraftEdgeRuns(runs.map { ($0[0], $0[1]) }, for: side))
+    }
+
+    private func redo() {
+        guard let (side, runs) = redoStack.popLast(), let frame else { return }
+        undoStack.append((side, frame.runs(side).map { [$0.0, $0.1] }))
+        selection = .edge(side)
+        report(themeManager.setDraftEdgeRuns(runs.map { ($0[0], $0[1]) }, for: side))
+    }
+
+    private func clearUndo() {
+        undoStack.removeAll()
+        redoStack.removeAll()
     }
 
     // MARK: - Inspector
 
     @ViewBuilder private var inspector: some View {
         switch selection {
+        case .theme:
+            themeInspector
         case .button(let button):
             buttonInspector(button)
         case .frame:
             frameInspector
+        case .edge(let side):
+            if let frame, frame.k1 == nil {
+                EdgeInspector(side: side, frame: previewFrame ?? frame, selected: $selectedRun,
+                              selectSide: { selection = .edge($0) },
+                              changed: themeManager.draftEdgeRunsChanged(side),
+                              canUndo: !undoStack.isEmpty, canRedo: !redoStack.isEmpty,
+                              undo: undo, redo: redo,
+                              revert: { themeManager.revertDraftEdgeRuns(side) },
+                              commit: { commit($0, side: side) })
+            } else {
+                frameInspector
+            }
+        }
+    }
+
+    private var themeInspector: some View {
+        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 10) {
+            GridRow {
+                Text("Name").gridColumnAlignment(.trailing)
+                TextField("Name", text: $info.name, prompt: Text("My Theme")).labelsHidden()
+                Text("Author").gridColumnAlignment(.trailing)
+                TextField("Author", text: $info.author, prompt: Text("Your name")).labelsHidden()
+            }
+            GridRow {
+                Text("Version")
+                Stepper(value: $info.version, in: 1...999) {
+                    Text("\(info.version)").monospacedDigit()
+                }
+                Text("Website")
+                TextField("Website", text: $info.source, prompt: Text("https://")).labelsHidden()
+            }
+            if let engine = info.engine {
+                GridRow {
+                    Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    Text(engineLabel(engine) == engine ? "Made for \(engine)" : engineLabel(engine))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .gridCellColumns(3)
+                }
+            }
         }
     }
 
@@ -545,14 +794,32 @@ struct ThemeEditorView: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
-                    FrameSourceMenu()
-                    Menu("Buttons") {
-                        Button("Take Buttons from Frame") { themeManager.takeButtonsFromFrame() }
-                        Button("Put Buttons in Frame") { themeManager.putButtonsInFrame() }
-                        Divider()
-                        Button("Remove Frame") { themeManager.useDraftFrame(from: nil) }
+                    FrameSourceMenu(picked: clearUndo)
+                    HStack {
+                        if frame?.k1 == nil {
+                            Menu("Edit Edge") {
+                                ForEach(WindowFrame.Side.allCases, id: \.self) { side in
+                                    Button(side.rawValue.capitalized) {
+                                        canvasMode = .slices
+                                        selection = .edge(side)
+                                    }
+                                }
+                            }
+                            .fixedSize()
+                            .help("Change how each edge's art is cut and drawn")
+                        }
+                        Menu("Buttons") {
+                            Button("Take Buttons from Frame") { themeManager.takeButtonsFromFrame() }
+                            Button("Put Buttons in Frame") { themeManager.putButtonsInFrame() }
+                                .disabled(!hasCustomImages)
+                            Divider()
+                            Button("Remove Frame") {
+                                clearUndo()
+                                themeManager.useDraftFrame(from: nil)
+                            }
+                        }
+                        .fixedSize()
                     }
-                    .fixedSize()
                 }
             }
         } else {
@@ -560,7 +827,7 @@ struct ThemeEditorView: View {
                 Text("No window frame. Take one from another theme.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                FrameSourceMenu()
+                FrameSourceMenu(picked: clearUndo)
             }
         }
     }
@@ -569,12 +836,14 @@ struct ThemeEditorView: View {
 // Its own view so the long theme list is only rebuilt when themes change.
 private struct FrameSourceMenu: View {
     @ObservedObject private var themeManager = ThemeManager.shared
+    var picked: () -> Void = {}
 
     var body: some View {
         let framed = themeManager.themes.filter { $0.frameDirectory != nil }
         Menu("Use Frame From") {
             ForEach(framed) { theme in
                 Button(theme.name) {
+                    picked()
                     themeManager.useDraftFrame(from: theme.frameDirectory)
                 }
             }
@@ -680,6 +949,700 @@ private struct ChecksView: View {
     }
 }
 
+// MARK: - Edge runs
+
+// Names for wnd# part codes, the way a run is drawn.
+private enum RunMode {
+    typealias Part = WindowFrame.Part
+    typealias Mode = (code: Int, name: String, symbol: String, help: String)
+    static let drawing: [Mode] = [
+        (Part.endCap, "Cap", "pin", "Drawn once at its own size"),
+        (Part.stretch, "Tile", "repeat", "Repeats from its start to fill the space"),
+        (Part.stretchEnd, "Tile from End", "repeat", "Repeats from its end to fill the space"),
+        (Part.period, "Repeat Whole", "square.split.1x2", "Repeats only whole copies"),
+        (Part.periodFill, "Fill", "arrow.right.to.line", "Takes whatever space is left, tiled from its start"),
+        (Part.periodFillEnd, "Fill from End", "arrow.left.to.line", "Takes whatever space is left, tiled from its end"),
+        (Part.scale, "Scale", "arrow.left.and.right", "Scaled to fill the space"),
+        (Part.crumple, "Crumple", "scissors", "Drawn once, dropped when the window is too small"),
+        (Part.title, "Title", "textformat", "Holds the title text and grows to fit it, tiled"),
+        (Part.titleCap, "Title Cap", "pin", "Drawn once when the window has a title"),
+        (Part.edge, "Gap", "circle.dashed", "Not drawn. Keeps its space at the ends of the edge"),
+    ]
+    static let widgets: [Mode] = [
+        (Part.close, "Close Box", "xmark.circle", "Drawn when the window has a close button"),
+        (Part.collapse, "Minimize Box", "minus.circle", "Drawn when the window has a minimize button"),
+        (Part.zoom, "Zoom Box", "plus.circle", "Drawn when the window has a zoom button"),
+        (Part.noClose, "No Close", "xmark.circle.fill", "Drawn when the window has no close button"),
+        (Part.noCollapse, "No Minimize", "minus.circle.fill", "Drawn when the window has no minimize button"),
+        (Part.noZoom, "No Zoom", "plus.circle.fill", "Drawn when the window has no zoom button"),
+    ]
+
+    // How the menu groups the modes.
+    static var groups: [(title: String, modes: [Mode])] {
+        func pick(_ codes: [Int]) -> [Mode] { codes.compactMap { c in drawing.first { $0.code == c } } }
+        return [("Fixed", pick([Part.endCap, Part.titleCap, Part.crumple, Part.edge])),
+                ("Grows", pick([Part.stretch, Part.stretchEnd, Part.period, Part.scale])),
+                ("Fills What's Left", pick([Part.periodFill, Part.periodFillEnd, Part.title])),
+                ("Buttons", widgets)]
+    }
+
+    static func name(_ code: Int) -> String {
+        (drawing + widgets).first { $0.code == code }?.name ?? "Code \(code)"
+    }
+
+    static func symbol(_ code: Int) -> String {
+        (drawing + widgets).first { $0.code == code }?.symbol ?? "questionmark"
+    }
+
+    // Modes WindowFrame.fill tiles, and those it tiles from the far end.
+    static func tiles(_ code: Int) -> Bool {
+        (Part.grows.contains(code) || Part.fills.contains(code) || code == Part.title) && code != Part.scale
+    }
+
+    static func fromEnd(_ code: Int) -> Bool {
+        code == Part.stretchEnd || code == Part.periodFillEnd
+    }
+
+    static func help(_ code: Int) -> String {
+        (drawing + widgets).first { $0.code == code }?.help ?? "A part code this editor doesn't know. It's kept as is."
+    }
+
+    static func tint(_ code: Int) -> Color {
+        if Part.grows.contains(code) { return .green }
+        if Part.fills.contains(code) { return .orange }
+        if code == Part.title { return .purple }
+        if code == Part.edge { return .clear }
+        if widgets.contains(where: { $0.code == code }) { return .blue }
+        return .gray
+    }
+}
+
+/// Edits on one side's list of (code, cumulative end). Each run starts where
+/// the one before it ends, so moving an end also moves the next run's start.
+private enum RunEdit {
+    typealias Runs = [(Int, Int)]
+
+    static func start(_ runs: Runs, _ i: Int) -> Int { i == 0 ? 0 : runs[i - 1].1 }
+
+    /// How far run i's end can move: from its start to the next run's end.
+    static func bounds(_ runs: Runs, _ i: Int, extent: Int) -> ClosedRange<Int> {
+        start(runs, i)...(i + 1 < runs.count ? runs[i + 1].1 : extent)
+    }
+
+    static func move(_ runs: Runs, _ i: Int, end: Int, extent: Int) -> Runs {
+        var new = runs
+        let range = bounds(runs, i, extent: extent)
+        new[i].1 = min(max(end, range.lowerBound), range.upperBound)
+        return new
+    }
+
+    static func setCode(_ runs: Runs, _ i: Int, _ code: Int) -> Runs {
+        var new = runs
+        new[i].0 = code
+        return new
+    }
+
+    /// Cuts run i in two at pixel `at`, both halves keeping its mode.
+    static func split(_ runs: Runs, _ i: Int, at: Int) -> Runs {
+        let low = start(runs, i), high = runs[i].1
+        guard high - low >= 2 else { return runs }
+        var new = runs
+        new.insert((runs[i].0, min(max(at, low + 1), high - 1)), at: i)
+        return new
+    }
+
+    /// Drops run i's end, so the next run takes its pixels.
+    static func mergeNext(_ runs: Runs, _ i: Int) -> Runs {
+        guard i + 1 < runs.count else { return runs }
+        var new = runs
+        new.remove(at: i)
+        return new
+    }
+
+    /// The run before i takes its pixels. Returns the run to select after.
+    static func mergePrevious(_ runs: Runs, _ i: Int) -> (runs: Runs, selected: Int) {
+        guard runs.count > 1 else { return (runs, i) }
+        guard i > 0 else { return (mergeNext(runs, i), 0) }
+        var new = runs
+        new[i - 1].1 = runs[i].1
+        new.remove(at: i)
+        return (new, i - 1)
+    }
+}
+
+/// The mode menu, grouped by how a run behaves as the window grows.
+private struct ModePicker: View {
+    let code: Int
+    let set: (Int) -> Void
+
+    var body: some View {
+        let known = (RunMode.drawing + RunMode.widgets).contains { $0.code == code }
+        Picker("Mode", selection: Binding(get: { code }, set: set)) {
+            ForEach(RunMode.groups, id: \.title) { group in
+                Section(group.title) {
+                    ForEach(group.modes, id: \.code) { Label($0.name, systemImage: $0.symbol).tag($0.code) }
+                }
+            }
+            if !known { Text(RunMode.name(code)).tag(code) }
+        }
+    }
+}
+
+/// The selected edge's name and history controls, and the selected run's
+/// mode and range. The runs themselves are edited in the Slices view.
+private struct EdgeInspector: View {
+    let side: WindowFrame.Side
+    // The frame as drawn, a drag or nudge in progress included.
+    let frame: WindowFrame
+    @Binding var selected: Int
+    let selectSide: (WindowFrame.Side) -> Void
+    let changed: Bool
+    let canUndo: Bool
+    let canRedo: Bool
+    let undo: () -> Void
+    let redo: () -> Void
+    let revert: () -> Void
+    let commit: ([(Int, Int)]) -> Void
+
+    private var runs: [(Int, Int)] { frame.runs(side) }
+    private var extent: Int { frame.extent(side) }
+    private var index: Int { min(selected, max(0, runs.count - 1)) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            if !runs.isEmpty { runRow }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Picker("Edge", selection: Binding(get: { side }, set: selectSide)) {
+                ForEach(WindowFrame.Side.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            Text("\(runs.count) runs, \(extent) px")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
+            Button(action: undo) { Image(systemName: "arrow.uturn.backward") }
+                .keyboardShortcut("z")
+                .disabled(!canUndo)
+                .help("Undo")
+            Button(action: redo) { Image(systemName: "arrow.uturn.forward") }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(!canRedo)
+                .help("Redo")
+            Button("Revert Edge", action: revert)
+                .disabled(!changed)
+                .help("Put this edge back as it was when the frame came in")
+        }
+    }
+
+    private var runRow: some View {
+        let i = index
+        let (code, end) = runs[i]
+        let range = RunEdit.bounds(runs, i, extent: extent)
+        let lower = range.lowerBound
+        let warnings = frame.runWarnings(side)
+        let setEnd = { (value: Int) in commit(RunEdit.move(runs, i, end: value, extent: extent)) }
+        return HStack(spacing: 12) {
+            Text("Run \(i + 1)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .monospacedDigit()
+            ModePicker(code: code) { commit(RunEdit.setCode(runs, i, $0)) }
+                .labelsHidden()
+                .fixedSize()
+                .help(RunMode.help(code))
+            Text("From \(lower)")
+                .monospacedDigit()
+            HStack(spacing: 4) {
+                Text("to")
+                TextField("End", value: Binding(get: { end }, set: setEnd), format: .number)
+                    .frame(width: 44)
+                    .labelsHidden()
+                Stepper("End", value: Binding(get: { end }, set: setEnd), in: range)
+                    .labelsHidden()
+            }
+            Text("\(end - lower) px")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .monospacedDigit()
+            if !warnings.isEmpty {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundColor(.yellow)
+                    .help(warnings.joined(separator: "\n"))
+            }
+            Spacer()
+            Button("Split") { commit(RunEdit.split(runs, i, at: (lower + end) / 2)) }
+                .disabled(end - lower < 2)
+                .help("Cut this run in two at its middle")
+            Button("Merge Next") { commit(RunEdit.mergeNext(runs, i)) }
+                .disabled(i + 1 >= runs.count)
+                .help("Join this run into the one after it")
+            Button("Delete") {
+                let result = RunEdit.mergePrevious(runs, i)
+                selected = result.selected
+                commit(result.runs)
+            }
+            .disabled(runs.count < 2)
+            .help("Remove this run. The one before it takes its pixels")
+        }
+        .controlSize(.small)
+    }
+}
+
+/// Maps between image pixels and canvas points for the Slices view. Zoom is
+/// a whole number when the image fits, so each pixel lands on whole points,
+/// and 1/n when it doesn't.
+private struct SlicesGeometry {
+    let image: CGSize
+    let zoom: CGFloat
+    let origin: CGPoint
+
+    init(bounds: CGSize, image: CGSize, top: CGFloat = 36, margin: CGFloat = 24) {
+        self.image = image
+        let fit = min((bounds.width - 2 * margin) / max(1, image.width),
+                      (bounds.height - top - margin) / max(1, image.height))
+        zoom = fit >= 1 ? min(16, fit.rounded(.down)) : 1 / (1 / max(fit, 0.01)).rounded(.up)
+        origin = CGPoint(x: ((bounds.width - image.width * zoom) / 2).rounded(),
+                         y: (top + (bounds.height - top - margin - image.height * zoom) / 2).rounded())
+    }
+
+    func rect(_ r: CGRect) -> CGRect {
+        CGRect(x: origin.x + r.minX * zoom, y: origin.y + r.minY * zoom, width: r.width * zoom, height: r.height * zoom)
+    }
+
+    /// Image position under a canvas point, fractional.
+    func position(_ point: CGPoint) -> CGPoint {
+        CGPoint(x: (point.x - origin.x) / zoom, y: (point.y - origin.y) / zoom)
+    }
+}
+
+// Routes key events from the window's monitor to the current view value.
+private final class SliceKeys {
+    var handle: (NSEvent) -> Bool = { _ in false }
+    var monitor: Any?
+}
+
+/// The whole frame image, big, with every edge's runs on it: guides at run
+/// ends, regions tinted by mode. Click a region to pick a run, drag a guide
+/// to move its end, right-click for more.
+private struct SlicesView: View {
+    // The frame as saved; drags and nudges start from it.
+    let frame: WindowFrame
+    // The frame as drawn, an edit in progress included.
+    let shown: WindowFrame
+    let selectedSide: WindowFrame.Side?
+    let selectedRun: Int
+    let inactive: Bool
+    let thumbnail: RenderedFrame?
+    let select: (WindowFrame.Side, Int) -> Void
+    let preview: (WindowFrame?) -> Void
+    let commit: ([(Int, Int)], WindowFrame.Side) -> Void
+    let showPreview: () -> Void
+
+    private enum Hit {
+        // Every run ending at the guide; zero-length runs can share one.
+        case guide(WindowFrame.Side, [Int])
+        case region(WindowFrame.Side, Int, pixel: Int)
+
+        var side: WindowFrame.Side {
+            switch self {
+            case .guide(let side, _), .region(let side, _, _): return side
+            }
+        }
+    }
+
+    private struct Drag {
+        let side: WindowFrame.Side
+        let candidates: [Int]
+        var run: Int?
+        var startEnd: Int
+    }
+
+    @State private var hover: CGPoint?
+    @State private var drag: Drag?
+    @State private var cursorPushed = false
+    @State private var keys = SliceKeys()
+    // The arrow key whose release commits a nudge.
+    @State private var nudgeKey: UInt16?
+
+    var body: some View {
+        let _ = keys.handle = handleKey
+        GeometryReader { geo in
+            let g = SlicesGeometry(bounds: geo.size, image: frame.size)
+            let hit = hover.flatMap { self.hit($0, g) }
+            ZStack(alignment: .topLeading) {
+                Color.gray.opacity(0.18)
+                Image(decorative: inactive ? shown.inactive : shown.active, scale: 1)
+                    .resizable()
+                    .interpolation(.none)
+                    .frame(width: frame.size.width * g.zoom, height: frame.size.height * g.zoom)
+                    .offset(x: g.origin.x, y: g.origin.y)
+                Canvas { context, _ in draw(context, g) }
+                    .allowsHitTesting(false)
+                readout(hit, g)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .allowsHitTesting(false)
+                thumbnailView(geo.size)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            }
+            .contentShape(Rectangle())
+            .gesture(gesture(g))
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let point): hover = point
+                case .ended: hover = nil
+                }
+                updateCursor(hover.flatMap { self.hit($0, g) })
+            }
+            .contextMenu { contextMenu(hit) }
+        }
+        .onAppear {
+            keys.monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [keys] event in
+                keys.handle(event) ? nil : event
+            }
+        }
+        .onDisappear {
+            if let monitor = keys.monitor { NSEvent.removeMonitor(monitor) }
+            keys.monitor = nil
+            if cursorPushed { NSCursor.pop() }
+            cursorPushed = false
+        }
+    }
+
+    // MARK: Hit testing
+
+    // The selected side first, then top and bottom, which draw over the
+    // sides in the corners.
+    private var order: [WindowFrame.Side] {
+        var sides: [WindowFrame.Side] = [.top, .bottom, .left, .right]
+        if let selectedSide {
+            sides.removeAll { $0 == selectedSide }
+            sides.insert(selectedSide, at: 0)
+        }
+        return sides
+    }
+
+    private func hit(_ point: CGPoint, _ g: SlicesGeometry) -> Hit? {
+        let p = g.position(point)
+        let reach = max(3, g.zoom / 2) / g.zoom
+        for side in order {
+            let band = frame.band(side)
+            guard band.insetBy(dx: side.horizontal ? -reach : 0, dy: side.horizontal ? 0 : -reach).contains(p) else { continue }
+            let along = side.horizontal ? p.x : p.y
+            let runs = shown.runs(side)
+            let ends = runs.indices.filter { runs[$0].1 > 0 && abs(CGFloat(runs[$0].1) - along) <= reach }
+            if let nearest = ends.min(by: { abs(CGFloat(runs[$0].1) - along) < abs(CGFloat(runs[$1].1) - along) }) {
+                return .guide(side, ends.filter { runs[$0].1 == runs[nearest].1 })
+            }
+        }
+        for side in order where frame.band(side).contains(p) {
+            let pixel = Int((side.horizontal ? p.x : p.y).rounded(.down))
+            let runs = shown.runs(side)
+            if let i = runs.indices.first(where: { RunEdit.start(runs, $0) <= pixel && pixel < runs[$0].1 }) {
+                return .region(side, i, pixel: pixel)
+            }
+        }
+        return nil
+    }
+
+    // MARK: Drawing
+
+    private func draw(_ context: GraphicsContext, _ g: SlicesGeometry) {
+        let content = g.rect(frame.content)
+        context.fill(Path(content), with: .color(.black.opacity(0.45)))
+        // Sides first, so top and bottom sit over them in the corners.
+        for side in [WindowFrame.Side.left, .right, .top, .bottom] {
+            drawRuns(side, context, g)
+        }
+        if let side = selectedSide {
+            drawRuns(side, context, g, emphasized: true)
+        }
+    }
+
+    private func span(_ side: WindowFrame.Side, _ start: Int, _ end: Int) -> CGRect {
+        let band = frame.band(side)
+        return side.horizontal
+            ? CGRect(x: CGFloat(start), y: band.minY, width: CGFloat(end - start), height: band.height)
+            : CGRect(x: band.minX, y: CGFloat(start), width: band.width, height: CGFloat(end - start))
+    }
+
+    private func drawRuns(_ side: WindowFrame.Side, _ context: GraphicsContext, _ g: SlicesGeometry, emphasized: Bool = false) {
+        let runs = shown.runs(side)
+        let isSelected = side == selectedSide
+        let extent = frame.extent(side)
+        for i in runs.indices {
+            let start = RunEdit.start(runs, i), end = min(runs[i].1, extent)
+            guard end > start else { continue }
+            let r = g.rect(span(side, start, end))
+            let code = runs[i].0
+            let picked = isSelected && i == selectedRun
+            if !emphasized {
+                context.fill(Path(r), with: .color(RunMode.tint(code).opacity(picked ? 0.4 : 0.18)))
+                if !side.horizontal { hatchCorners(r, context, g) }
+                drawIcon(code, in: r, context)
+            }
+            if picked {
+                context.stroke(Path(r.insetBy(dx: 0.5, dy: 0.5)), with: .color(.accentColor), lineWidth: 1.5)
+            }
+        }
+        if !emphasized, let last = runs.last, last.1 < extent {
+            // Past the last run. Never drawn.
+            context.fill(Path(g.rect(span(side, max(0, last.1), extent))), with: .color(.black.opacity(0.35)))
+        }
+        // Guides at run ends, across the band only.
+        var guides = Path()
+        for (_, end) in runs where end > 0 && end <= extent {
+            let line = g.rect(span(side, end, end))
+            guides.move(to: CGPoint(x: line.minX, y: line.minY))
+            guides.addLine(to: CGPoint(x: side.horizontal ? line.minX : line.maxX, y: side.horizontal ? line.maxY : line.minY))
+        }
+        if emphasized {
+            context.stroke(guides, with: .color(.accentColor), lineWidth: 1.5)
+        } else if !isSelected {
+            context.stroke(guides, with: .color(.primary.opacity(0.45)), lineWidth: 1)
+        }
+    }
+
+    // Side runs in the top and bottom rows are drawn over, so they're hatched.
+    private func hatchCorners(_ r: CGRect, _ context: GraphicsContext, _ g: SlicesGeometry) {
+        let content = g.rect(frame.content)
+        let covered = [CGRect(x: r.minX, y: r.minY, width: r.width, height: max(0, content.minY - r.minY)),
+                       CGRect(x: r.minX, y: content.maxY, width: r.width, height: max(0, r.maxY - content.maxY))]
+            .map { $0.intersection(r) }
+            .filter { !$0.isNull && !$0.isEmpty }
+        for area in covered {
+            var hatch = Path()
+            var x = area.minX - area.height
+            while x < area.maxX {
+                hatch.move(to: CGPoint(x: x, y: area.maxY))
+                hatch.addLine(to: CGPoint(x: x + area.height, y: area.minY))
+                x += 5
+            }
+            var clipped = context
+            clipped.clip(to: Path(area))
+            clipped.fill(Path(area), with: .color(.black.opacity(0.25)))
+            clipped.stroke(hatch, with: .color(.white.opacity(0.35)), lineWidth: 0.5)
+        }
+    }
+
+    private func drawIcon(_ code: Int, in r: CGRect, _ context: GraphicsContext) {
+        guard r.width >= 14, r.height >= 14 else { return }
+        var layer = context
+        layer.translateBy(x: r.midX, y: r.midY)
+        // Tile from End shares Tile's icon, mirrored.
+        if code == WindowFrame.Part.stretchEnd { layer.scaleBy(x: -1, y: 1) }
+        let icon = Text(Image(systemName: RunMode.symbol(code)))
+            .font(.system(size: min(12, r.height - 4)))
+            .foregroundColor(.white)
+        layer.draw(icon, at: .zero)
+    }
+
+    // MARK: Overlays
+
+    private func readout(_ hit: Hit?, _ g: SlicesGeometry) -> some View {
+        var text = ""
+        if let hover {
+            let p = g.position(hover)
+            let x = Int(p.x.rounded(.down)), y = Int(p.y.rounded(.down))
+            if x >= 0, y >= 0, x < Int(frame.size.width), y < Int(frame.size.height) { text = "x \(x), y \(y)" }
+        }
+        switch hit {
+        case .guide(let side, let runs):
+            let end = shown.runs(side)[runs[0]].1
+            text += "  \(side.rawValue.capitalized) run \(runs[0] + 1) ends at \(end). Drag to move"
+        case .region(let side, let i, _):
+            let runs = shown.runs(side)
+            text += "  \(side.rawValue.capitalized) run \(i + 1): \(RunMode.name(runs[i].0)), \(RunEdit.start(runs, i))-\(runs[i].1)"
+        case nil:
+            break
+        }
+        return Text(text.trimmingCharacters(in: .whitespaces))
+            .font(.caption.monospacedDigit())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(.regularMaterial))
+            .opacity(text.isEmpty ? 0 : 1)
+    }
+
+    @ViewBuilder private func thumbnailView(_ bounds: CGSize) -> some View {
+        if let thumbnail {
+            let size = CGSize(width: CGFloat(thumbnail.image.width) / 2, height: CGFloat(thumbnail.image.height) / 2)
+            let scale = min(1, bounds.width * 0.3 / size.width, bounds.height * 0.3 / size.height)
+            Image(decorative: thumbnail.image, scale: 2)
+                .resizable()
+                .interpolation(scale < 1 ? .medium : .none)
+                .frame(width: size.width * scale, height: size.height * scale)
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .windowBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.4), lineWidth: 0.5))
+                .onTapGesture(perform: showPreview)
+                .help("How it draws. Click for the full preview")
+        }
+    }
+
+    @ViewBuilder private func contextMenu(_ hit: Hit?) -> some View {
+        if case .region(let side, let i, let pixel) = hit {
+            let runs = frame.runs(side)
+            let start = RunEdit.start(runs, i)
+            ModePicker(code: runs[i].0) { edit(side, i, RunEdit.setCode(runs, i, $0)) }
+            Divider()
+            Button("Split at \(pixel)") { edit(side, i, RunEdit.split(runs, i, at: max(pixel, start + 1))) }
+                .disabled(runs[i].1 - start < 2)
+            Button("Merge with Next") { edit(side, i, RunEdit.mergeNext(runs, i)) }
+                .disabled(i + 1 >= runs.count)
+            Button("Delete") {
+                let result = RunEdit.mergePrevious(runs, i)
+                edit(side, result.selected, result.runs)
+            }
+            .disabled(runs.count < 2)
+        }
+    }
+
+    private func edit(_ side: WindowFrame.Side, _ i: Int, _ runs: [(Int, Int)]) {
+        select(side, i)
+        commit(runs, side)
+    }
+
+    // MARK: Mouse
+
+    private func gesture(_ g: SlicesGeometry) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if drag == nil {
+                    guard case .guide(let side, let runs) = hit(value.startLocation, g) else { return }
+                    drag = Drag(side: side, candidates: runs, run: runs.count == 1 ? runs[0] : nil,
+                                startEnd: frame.runs(side)[runs[0]].1)
+                }
+                guard var d = drag else { return }
+                let moved = d.side.horizontal ? value.translation.width : value.translation.height
+                let delta = Int((moved / g.zoom).rounded())
+                if d.run == nil {
+                    guard delta != 0 else { return }
+                    // Runs sharing an end: forward moves the last, backward the first.
+                    d.run = delta > 0 ? d.candidates.max() : d.candidates.min()
+                    drag = d
+                }
+                guard let i = d.run else { return }
+                let runs = RunEdit.move(frame.runs(d.side), i, end: d.startEnd + delta, extent: frame.extent(d.side))
+                preview(frame.with(d.side, runs: runs))
+            }
+            .onEnded { value in
+                if let d = drag {
+                    drag = nil
+                    if let i = d.run {
+                        select(d.side, i)
+                        commit(shown.runs(d.side), d.side)
+                    } else {
+                        select(d.side, d.candidates[0])
+                    }
+                    return
+                }
+                let distance = hypot(value.translation.width, value.translation.height)
+                if distance < 3, case .region(let side, let i, _) = hit(value.startLocation, g) {
+                    select(side, i)
+                }
+            }
+    }
+
+    private func updateCursor(_ hit: Hit?) {
+        var cursor: NSCursor?
+        if case .guide(let side, _) = hit { cursor = side.horizontal ? .resizeLeftRight : .resizeUpDown }
+        if cursorPushed { NSCursor.pop() }
+        cursorPushed = cursor != nil
+        cursor?.push()
+    }
+
+    // MARK: Keys
+
+    // Arrows along the selected edge nudge the run's end, 10 px with Shift,
+    // and a held key makes one edit. Arrows across it, and Tab, pick the
+    // next or previous run. Delete gives the run to the one before it.
+    private func handleKey(_ event: NSEvent) -> Bool {
+        guard let side = selectedSide, !(event.window?.firstResponder is NSText),
+              event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return false }
+        let runs = frame.runs(side)
+        guard runs.indices.contains(selectedRun) else { return false }
+        let i = selectedRun
+        let (forward, backward, next, previous): (UInt16, UInt16, UInt16, UInt16) =
+            side.horizontal ? (124, 123, 125, 126) : (125, 126, 124, 123)
+
+        if event.type == .keyUp {
+            guard event.keyCode == nudgeKey else { return false }
+            nudgeKey = nil
+            commit(shown.runs(side), side)
+            return true
+        }
+        switch event.keyCode {
+        case forward, backward:
+            let step = event.modifierFlags.contains(.shift) ? 10 : 1
+            let current = shown.runs(side)
+            let end = current[i].1 + (event.keyCode == forward ? step : -step)
+            nudgeKey = event.keyCode
+            preview(frame.with(side, runs: RunEdit.move(current, i, end: end, extent: frame.extent(side))))
+        case next, previous, 48:
+            let back = event.keyCode == previous || (event.keyCode == 48 && event.modifierFlags.contains(.shift))
+            select(side, min(max(0, i + (back ? -1 : 1)), runs.count - 1))
+        case 51, 117:
+            guard !event.isARepeat else { return true }
+            let result = RunEdit.mergePrevious(runs, i)
+            edit(side, result.selected, result.runs)
+        default:
+            return false
+        }
+        return true
+    }
+}
+
+/// A segmented control that can disable single segments, which a segmented
+/// Picker ignores on macOS.
+private struct SegmentedControl<Value: Hashable>: NSViewRepresentable {
+    let items: [(value: Value, title: String)]
+    @Binding var selection: Value
+    let enabled: Set<Value>
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(labels: items.map(\.title), trackingMode: .selectOne,
+                                         target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        control.setContentHuggingPriority(.required, for: .horizontal)
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.parent = self
+        for (i, item) in items.enumerated() {
+            control.setLabel(item.title, forSegment: i)
+            control.setEnabled(enabled.contains(item.value), forSegment: i)
+        }
+        control.selectedSegment = items.firstIndex { $0.value == selection } ?? -1
+    }
+
+    final class Coordinator: NSObject {
+        var parent: SegmentedControl
+
+        init(_ parent: SegmentedControl) { self.parent = parent }
+
+        @objc func changed(_ sender: NSSegmentedControl) {
+            let i = sender.selectedSegment
+            guard parent.items.indices.contains(i), parent.enabled.contains(parent.items[i].value) else {
+                sender.selectedSegment = parent.items.firstIndex { $0.value == parent.selection } ?? -1
+                return
+            }
+            parent.selection = parent.items[i].value
+        }
+    }
+}
+
 private struct SaveThemeSheet: View {
     @Binding var name: String
     @Binding var author: String
@@ -706,15 +1669,6 @@ private struct SaveThemeSheet: View {
         .padding(20)
         .frame(width: 320)
     }
-}
-
-// Sized to its pixels, ignoring DPI metadata, like the overlays draw it.
-private func pixelImage(atPath path: String?) -> NSImage? {
-    guard let path, let image = NSImage(contentsOfFile: path) else { return nil }
-    if let rep = image.representations.first, rep.pixelsWide > 0, rep.pixelsHigh > 0 {
-        image.size = NSSize(width: rep.pixelsWide, height: rep.pixelsHigh)
-    }
-    return image
 }
 
 /// Hands the first dropped file URL to `handler` on the main queue.

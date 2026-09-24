@@ -19,7 +19,7 @@ enum WindowFrameStore {
     }
 
     /// Rereads the frame on next use. A folder's contents can change under
-    /// the same path, as the Custom tab's draft does.
+    /// the same path, as the Editor tab's draft does.
     static func invalidate() {
         cachedPath = nil
         cached = nil
@@ -38,7 +38,15 @@ struct BorderTarget {
     /// the buttons stay at the traffic lights, and the frame draws the
     /// scheme's art for a window without them.
     var widgets: Set<WindowFrame.Widget> {
-        guard UserDefaults.standard.bool(forKey: "frameButtons") else { return [] }
+        UserDefaults.standard.bool(forKey: "frameButtons") ? present : []
+    }
+
+    /// Widgets the window has whose buttons stay at the traffic lights.
+    var hiddenWidgets: Set<WindowFrame.Widget> {
+        present.subtracting(widgets)
+    }
+
+    private var present: Set<WindowFrame.Widget> {
         var set: Set<WindowFrame.Widget> = []
         if close != nil { set.insert(.close) }
         if zoom != nil { set.insert(.zoom) }
@@ -68,7 +76,8 @@ final class BorderWindow {
     private var pressedWidget: WindowFrame.Widget?
     private var trackingWidget: WindowFrame.Widget?
     private var layout: WindowFrame.Layout?
-    private var layoutWidgets: Set<WindowFrame.Widget>?
+    // Drawn and hidden widgets as of the last redraw.
+    private var layoutWidgets: [Set<WindowFrame.Widget>]?
     // Size of the window-server shape and the context drawing into it. The
     // context is tied to the backing store it was made for, so a new shape
     // needs a new context.
@@ -174,7 +183,7 @@ final class BorderWindow {
     func update(target: BorderTarget, pid: pid_t, frame: CGRect) {
         let resized = frame.size != targetFrame.size
         // Widgets also change when the frameButtons setting does.
-        let retitled = target.title != self.target?.title || target.widgets != layoutWidgets
+        let retitled = target.title != self.target?.title || [target.widgets, target.hiddenWidgets] != layoutWidgets
         self.target = target
         self.pid = pid
         targetFrame = frame
@@ -281,12 +290,13 @@ final class BorderWindow {
         guard !closed, targetFrame.width > 0, targetFrame.height > 0 else { return }
         guard let (image, layout) = windowFrame.render(
             windowSize: targetFrame.size, active: isActive, widgets: target?.widgets ?? [],
+            hidden: target?.hiddenWidgets ?? [],
             title: target?.title, pressedWidget: pressedWidget,
             cornerRadius: cornerRadius, scale: Self.scale
         ) else { return }
         let oldShape = self.layout?.shape
         self.layout = layout
-        layoutWidgets = target?.widgets
+        layoutWidgets = target.map { [$0.widgets, $0.hiddenWidgets] }
         let cid = SkyLight.cid
         let reshape = layout.size != shapeSize
 

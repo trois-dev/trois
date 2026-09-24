@@ -101,12 +101,7 @@ extension WindowFrame {
         let hole = CGRect(x: i.left, y: i.top, width: windowSize.width, height: windowSize.height)
         context.clear(hole)
         if cornerRadius > 0, let color = k1Pixel(icon, x: 5, y: 7) {
-            let corners = CGMutablePath()
-            corners.addRect(hole)
-            corners.addRoundedRect(in: hole, cornerWidth: cornerRadius, cornerHeight: cornerRadius)
-            context.addPath(corners)
-            context.setFillColor(color)
-            context.fillPath(using: .evenOdd)
+            fillCorners(of: hole, radius: cornerRadius, color: color, in: context)
         }
 
         // Inactive windows show neither widgets nor stripes.

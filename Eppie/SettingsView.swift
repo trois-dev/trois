@@ -18,15 +18,15 @@ struct SettingsView: View {
     var body: some View {
         TabView(selection: $navigation.tab) {
             ThemePickerView()
-                .tabItem { Label("Themes", systemImage: "paintpalette") }
+                .tabItem { Label("Installed", systemImage: "paintpalette") }
                 .tag(SettingsTab.themes)
 
             CatalogView()
-                .tabItem { Label("Get Themes", systemImage: "arrow.down.circle") }
+                .tabItem { Label("Gallery", systemImage: "arrow.down.circle") }
                 .tag(SettingsTab.getThemes)
 
             ThemeEditorView()
-                .tabItem { Label("Custom", systemImage: "slider.horizontal.3") }
+                .tabItem { Label("Editor", systemImage: "slider.horizontal.3") }
                 .tag(SettingsTab.custom)
 
             AboutView()
@@ -40,42 +40,89 @@ struct SettingsView: View {
 
 struct CatalogView: View {
     @ObservedObject var catalog = ThemeCatalog.shared
+    @ObservedObject var themeManager = ThemeManager.shared
+    @AppStorage("windowBorders") private var windowBorders = true
+    @State private var query = ""
+    // Empty means every engine.
+    @State private var engine = ""
+
+    // Matches the Installed tab, which shows windows when borders are on.
+    private var previewSize: CGSize {
+        windowBorders ? FramePreviewRenderer.canvas : CGSize(width: 120, height: 60)
+    }
+
+    private var engines: [String] {
+        Array(Set(catalog.themes.compactMap(\.engine))).sorted()
+    }
+
+    // Matches every word of the query against the name and author.
+    private var filtered: [CatalogTheme] {
+        let words = query.lowercased().split(separator: " ")
+        return catalog.themes.filter { entry in
+            guard engine.isEmpty || entry.engine == engine else { return false }
+            let text = "\(entry.name) \(entry.author)".lowercased()
+            return words.allSatisfy { text.contains($0) }
+        }
+    }
+
+    // Installed themes the catalog has a newer version of.
+    private func pendingUpdates(_ installed: [String: Theme]) -> [CatalogTheme] {
+        catalog.themes.filter { entry in
+            guard let theme = installed[entry.id] else { return false }
+            return (theme.version ?? 0) < entry.version
+        }
+    }
 
     var body: some View {
+        // Looked up once here; the catalog and the installed list each run to thousands.
+        let installed = themeManager.installedThemesByFolder()
+        let updates = pendingUpdates(installed)
         VStack(spacing: 0) {
-            if catalog.themes.isEmpty {
-                VStack(spacing: 12) {
-                    Spacer()
-                    if let error = catalog.loadError, !catalog.isLoading {
-                        Text(error)
+            if !catalog.themes.isEmpty {
+                filterBar
+                Divider()
+                let shown = filtered
+                if shown.isEmpty {
+                    VStack {
+                        Spacer()
+                        Text("No themes match.")
                             .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                        Button("Try Again") { catalog.refresh() }
-                    } else {
-                        ProgressView()
+                        Spacer()
                     }
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
-                .padding()
-            } else {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 16) {
-                        ForEach(catalog.themes) { entry in
-                            CatalogCard(entry: entry)
+                    .frame(maxWidth: .infinity)
+                } else {
+                    grid {
+                        ForEach(shown) { entry in
+                            CatalogCard(entry: entry, installed: installed[entry.id],
+                                        previewSize: previewSize, showsWindow: windowBorders)
                         }
                     }
-                    .padding()
+                }
+            } else if let error = catalog.loadError, !catalog.isLoading {
+                errorState(error)
+            } else {
+                grid {
+                    ForEach(0..<6, id: \.self) { _ in placeholderCard }
                 }
             }
 
             Divider()
 
             HStack {
-                Text("Themes are the work of their authors.")
+                Text(catalog.themes.isEmpty
+                     ? "Themes are the work of their authors."
+                     : "\(catalog.themes.count) themes, each the work of its author.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                Link("Credits", destination: URL(string: "https://github.com/trois-dev/trois#credits")!)
+                    .font(.caption)
                 Spacer()
+                if !updates.isEmpty {
+                    Button(action: { catalog.update(updates.map(\.id)) }) {
+                        Label("Update All (\(updates.count))", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(updates.allSatisfy { catalog.installing.contains($0.id) })
+                }
                 Button(action: { catalog.refresh() }) {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
@@ -97,83 +144,264 @@ struct CatalogView: View {
             Text(catalog.installError ?? "")
         }
     }
+
+    private var filterBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("Search by name or author", text: $query)
+                    .textFieldStyle(.plain)
+                if !query.isEmpty {
+                    Button(action: { query = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear search")
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.3), lineWidth: 1))
+
+            Picker("Engine", selection: $engine) {
+                Text("All Engines").tag("")
+                ForEach(engines, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden()
+            .fixedSize()
+
+            if !query.isEmpty || !engine.isEmpty {
+                Text("\(filtered.count) of \(catalog.themes.count)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+
+    private func grid<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: previewSize.width))], spacing: 16) {
+                content()
+            }
+            .padding()
+        }
+    }
+
+    // Stands in for a card while the catalog loads.
+    private var placeholderCard: some View {
+        let buttons = HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { _ in
+                Circle().fill(Color.gray.opacity(0.25)).frame(width: 14, height: 14)
+            }
+        }
+        return ThemeCard(
+            name: "Theme Name", author: "Author", isSelected: false, previewSize: previewSize,
+            preview: windowBorders ? AnyView(PlainWindowPreview(previewSize: previewSize, buttons: buttons)) : AnyView(buttons)
+        ) { }
+        .redacted(reason: .placeholder)
+        .disabled(true)
+    }
+
+    private func errorState(_ error: String) -> some View {
+        VStack(spacing: 8) {
+            Spacer()
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 32))
+                .foregroundColor(.secondary)
+            Text("Themes Unavailable")
+                .font(.headline)
+            Text(error)
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+            Button("Try Again") { catalog.refresh() }
+                .padding(.top, 4)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+    }
 }
 
+// Clicking installs the theme, or updates it, and applies it.
 struct CatalogCard: View {
     let entry: CatalogTheme
+    let installed: Theme?
+    let previewSize: CGSize
+    let showsWindow: Bool
     @ObservedObject var catalog = ThemeCatalog.shared
     @ObservedObject var themeManager = ThemeManager.shared
+    @State private var hovering = false
 
-    private var installed: Theme? {
-        themeManager.installedTheme(named: entry.id)
+    private var hasUpdate: Bool {
+        installed.map { ($0.version ?? 0) < entry.version } ?? false
+    }
+    private var isInstalling: Bool {
+        catalog.installing.contains(entry.id)
+    }
+    private var isApplied: Bool {
+        installed.map { themeManager.currentTheme?.id == $0.id } ?? false
     }
 
     var body: some View {
-        VStack(spacing: 4) {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color(nsColor: .windowBackgroundColor))
-                .frame(height: 60)
-                .overlay(preview)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                )
-
-            Text(entry.name)
-                .font(.caption)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Text("by \(entry.author)")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            if let engine = entry.engine {
-                Text(engine)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-
-            action
-                .controlSize(.small)
-                .frame(height: 22)
+        ThemeCard(
+            name: entry.name,
+            author: entry.author,
+            engine: entry.engine,
+            isSelected: isApplied,
+            previewSize: previewSize,
+            badge: AnyView(badge),
+            preview: preview
+        ) {
+            activate()
         }
-        .frame(width: 120)
-    }
-
-    @ViewBuilder
-    private var action: some View {
-        if catalog.installing.contains(entry.id) {
-            ProgressView()
-                .scaleEffect(0.6)
-        } else if let installed, (installed.version ?? 0) >= entry.version {
-            if themeManager.currentTheme?.id == installed.id {
-                Text("Applied")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            } else {
-                Button("Apply") { themeManager.applyTheme(installed) }
+        .onHover { hovering = $0 }
+        .help(hint)
+        .contextMenu {
+            if let source = entry.source.flatMap(URL.init(string:)),
+               ["http", "https"].contains(source.scheme?.lowercased() ?? "") {
+                Button("Visit Source") { NSWorkspace.shared.open(source) }
             }
-        } else {
-            Button(installed == nil ? "Install" : "Update") { catalog.install(entry.id) }
-        }
-    }
-
-    // Previews are PNGs at their pixel size, like the theme grid.
-    private var preview: some View {
-        HStack(spacing: 4) {
-            ForEach(["close", "minimize", "zoom"], id: \.self) { key in
-                if let path = entry.preview[key], let url = catalog.url(for: path) {
-                    AsyncImage(url: url, scale: 1) { image in
-                        image.interpolation(.none)
-                    } placeholder: {
-                        Color.clear.frame(width: 14, height: 14)
-                    }
+            if let installed {
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([installed.path])
+                }
+                Button("Delete Theme", role: .destructive) {
+                    themeManager.deleteTheme(installed)
                 }
             }
         }
     }
+
+    private func activate() {
+        guard !isInstalling else { return }
+        if let installed, !hasUpdate {
+            themeManager.applyTheme(installed)
+        } else {
+            catalog.install(entry.id)
+        }
+    }
+
+    private var hint: String {
+        if isInstalling { return "Installing" }
+        if installed == nil { return "Install and apply" }
+        if hasUpdate { return "Update and apply" }
+        return isApplied ? "Applied" : "Apply"
+    }
+
+    // Download shows only on hover, so the grid stays quiet.
+    @ViewBuilder
+    private var badge: some View {
+        if isInstalling {
+            ProgressView().controlSize(.small)
+        } else if hasUpdate {
+            symbol("arrow.up.circle.fill", .accentColor)
+        } else if installed != nil {
+            symbol("checkmark.circle.fill", .gray)
+        } else if hovering {
+            symbol("arrow.down.circle.fill", .accentColor)
+        }
+    }
+
+    private func symbol(_ name: String, _ color: Color) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 15))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(.white, color)
+    }
+
+    private var buttons: some View {
+        HStack(spacing: 4) {
+            ForEach(["close", "minimize", "zoom"], id: \.self) { key in
+                CatalogButtonImage(url: entry.preview[key].flatMap { catalog.url(for: $0) })
+            }
+        }
+    }
+
+    private var preview: AnyView {
+        showsWindow ? AnyView(PlainWindowPreview(previewSize: previewSize, buttons: buttons)) : AnyView(buttons)
+    }
+}
+
+/// Catalog button previews, kept so cards scrolled back into view don't
+/// download them again.
+enum CatalogPreviewCache {
+    private static let cache = NSCache<NSURL, NSImage>()
+
+    static func cached(_ url: URL) -> NSImage? {
+        cache.object(forKey: url as NSURL)
+    }
+
+    static func load(_ url: URL) async -> NSImage? {
+        if let hit = cached(url) { return hit }
+        guard let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode ?? 200 == 200,
+              let image = NSImage(data: data) else { return nil }
+        let pixelSized = normalizedImage(image)
+        cache.setObject(pixelSized, forKey: url as NSURL)
+        return pixelSized
+    }
+}
+
+// Previews are PNGs at their pixel size, like the theme grid. A faint circle
+// holds the spot until one loads.
+struct CatalogButtonImage: View {
+    let url: URL?
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image = image ?? url.flatMap(CatalogPreviewCache.cached) {
+                Image(nsImage: image)
+                    .interpolation(.none)
+            } else {
+                Circle().fill(Color.gray.opacity(0.25)).frame(width: 14, height: 14)
+            }
+        }
+        .task(id: url) {
+            if let url {
+                image = await CatalogPreviewCache.load(url)
+            }
+        }
+    }
+}
+
+// A frameless window for themes without a frame, sized like the framed ones.
+struct PlainWindowPreview<Buttons: View>: View {
+    let previewSize: CGSize
+    let buttons: Buttons
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
+            .fill(Color(nsColor: .windowBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
+                    .stroke(Color.gray.opacity(0.4), lineWidth: 0.5)
+            )
+            .overlay(alignment: .topLeading) {
+                buttons.padding(8)
+            }
+            .frame(width: previewSize.width - 24, height: previewSize.height - 24)
+    }
+}
+
+// Sizes an image by its pixels, ignoring DPI metadata.
+private func normalizedImage(_ image: NSImage) -> NSImage {
+    if let rep = image.representations.first {
+        let pixelWidth = rep.pixelsWide
+        let pixelHeight = rep.pixelsHigh
+        if pixelWidth > 0 && pixelHeight > 0 {
+            image.size = NSSize(width: pixelWidth, height: pixelHeight)
+        }
+    }
+    return image
 }
 
 private func reloadOverlays() {
@@ -239,8 +467,8 @@ struct ThemePickerView: View {
             if themeManager.currentTheme?.frameDirectory != nil {
                 Divider()
                 HStack {
-                    Toggle("Window Borders", isOn: $windowBorders)
-                    Toggle("Buttons in Frame", isOn: $frameButtons)
+                    Toggle("Window borders", isOn: $windowBorders)
+                    Toggle("Buttons in frame", isOn: $frameButtons)
                         .disabled(!windowBorders)
                         .help("Put the close, zoom and minimize buttons in the frame instead of at the traffic lights")
                     Spacer()
@@ -334,18 +562,8 @@ struct ThemePickerView: View {
         ))
     }
 
-    // A frameless window for themes without a frame, sized like the framed ones.
     private func plainWindow<Buttons: View>(_ buttons: Buttons) -> some View {
-        RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
-            .fill(Color(nsColor: .windowBackgroundColor))
-            .overlay(
-                RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
-                    .stroke(Color.gray.opacity(0.4), lineWidth: 0.5)
-            )
-            .overlay(alignment: .topLeading) {
-                buttons.padding(8)
-            }
-            .frame(width: previewSize.width - 24, height: previewSize.height - 24)
+        PlainWindowPreview(previewSize: previewSize, buttons: buttons)
     }
 
     // Sized and spaced like the macOS 27 buttons.
@@ -357,41 +575,34 @@ struct ThemePickerView: View {
         }
     }
 
+    // Trimmed like the overlays, so the art lines up the way it does on screen.
     private func themePreview(_ theme: Theme) -> some View {
-        HStack(spacing: 4) {
-            if let closeURL = theme.closeUp, let image = NSImage(contentsOf: closeURL) {
-                Image(nsImage: normalizedImage(image))
+        func upImage(_ states: [URL?]) -> NSImage? {
+            ButtonArt.load(states.map { $0?.path })[0]
+        }
+        return HStack(spacing: 4) {
+            if let image = upImage([theme.closeUp, theme.closeHover, theme.closeDown, theme.closeDisabled]) {
+                Image(nsImage: image)
                     .interpolation(.none)
             } else {
                 Circle().fill(Color.red).frame(width: 14, height: 14)
             }
 
-            if let minURL = theme.minimizeUp, let image = NSImage(contentsOf: minURL) {
-                Image(nsImage: normalizedImage(image))
+            if let image = upImage([theme.minimizeUp, theme.minimizeHover, theme.minimizeDown, theme.minimizeDisabled]) {
+                Image(nsImage: image)
                     .interpolation(.none)
             } else {
                 Circle().fill(Color.yellow).frame(width: 14, height: 14)
             }
 
-            if let maxURL = theme.maximizeUp, let image = NSImage(contentsOf: maxURL) {
-                Image(nsImage: normalizedImage(image))
+            if let image = upImage([theme.maximizeUp, theme.maximizeHover, theme.maximizeDown, theme.maximizeDisabled,
+                                    theme.restoreUp, theme.restoreDown]) {
+                Image(nsImage: image)
                     .interpolation(.none)
             } else {
                 Circle().fill(Color.green).frame(width: 14, height: 14)
             }
         }
-    }
-
-    // Normalize image size to pixel dimensions, ignoring DPI metadata
-    private func normalizedImage(_ image: NSImage) -> NSImage {
-        if let rep = image.representations.first {
-            let pixelWidth = rep.pixelsWide
-            let pixelHeight = rep.pixelsHigh
-            if pixelWidth > 0 && pixelHeight > 0 {
-                image.size = NSSize(width: pixelWidth, height: pixelHeight)
-            }
-        }
-        return image
     }
 }
 
@@ -401,6 +612,8 @@ struct ThemeCard<Preview: View>: View {
     var engine: String? = nil
     let isSelected: Bool
     var previewSize = CGSize(width: 120, height: 60)
+    // Status icon in the preview's top-right corner.
+    var badge: AnyView? = nil
     let preview: Preview
     let action: () -> Void
 
@@ -421,6 +634,11 @@ struct ThemeCard<Preview: View>: View {
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(isSelected ? Color.accentColor : Color.gray.opacity(0.3), lineWidth: isSelected ? 2 : 1)
                     )
+                    .overlay(alignment: .topTrailing) {
+                        if let badge {
+                            badge.padding(5)
+                        }
+                    }
 
                 Text(name)
                     .font(.caption)
@@ -435,7 +653,7 @@ struct ThemeCard<Preview: View>: View {
                         .truncationMode(.tail)
                 }
                 if let engine = engine {
-                    Text(engine)
+                    Text(engineLabel(engine))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -559,17 +777,6 @@ struct ButtonStateSlot: View {
         isGenerated = ThemeManager.shared.isDraftImageGenerated(forKey: userDefaultsKey)
     }
 
-    // Normalize image size to pixel dimensions, ignoring DPI metadata
-    private func normalizedImage(_ image: NSImage) -> NSImage {
-        if let rep = image.representations.first {
-            let pixelWidth = rep.pixelsWide
-            let pixelHeight = rep.pixelsHigh
-            if pixelWidth > 0 && pixelHeight > 0 {
-                image.size = NSSize(width: pixelWidth, height: pixelHeight)
-            }
-        }
-        return image
-    }
 }
 
 struct ImagePickerRow: View {
@@ -653,8 +860,8 @@ struct AboutView: View {
             VStack(alignment: .leading, spacing: 6) {
                 feature("Themed buttons", "for close, minimize and zoom")
                 feature("Window frames", "drawn from each theme's chrome")
-                feature("Get Themes", "to browse and install from the gallery")
-                feature("Custom", "to build your own or mix parts from others")
+                feature("Gallery", "to browse and install themes")
+                feature("Editor", "to build your own or mix parts from others")
             }
             .font(.callout)
 
@@ -704,7 +911,7 @@ struct CreditsView: View {
                 }
             }
 
-            section("Theme archives") {
+            section("Theme Archives") {
                 ForEach(Self.archives, id: \.name) { archive in
                     if let url = URL(string: archive.url) {
                         Link(archive.name, destination: url)
@@ -718,7 +925,7 @@ struct CreditsView: View {
                 Link("github.com/trois-dev/trois-themes/issues", destination: URL(string: "https://github.com/trois-dev/trois-themes/issues")!)
             }
 
-            section("Injection mode") {
+            section("Injection Mode") {
                 HStack(spacing: 4) {
                     Text("Uses the same approach as")
                     Link("MacForge", destination: URL(string: "https://github.com/MacEnhance/MacForge")!)

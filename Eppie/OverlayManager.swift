@@ -453,6 +453,56 @@ func visiblePath(_ bounds: CGRect, minus covered: [CGRect]) -> CGPath {
     return CGPath(rect: bounds, transform: nil).subtracting(union, using: .winding)
 }
 
+/// Theme button art without the transparent margin around it. Kaleidoscope 1.x
+/// icons are 16x16 with the art in the top-left 13x13, so centering the whole
+/// canvas on a traffic light puts the art off center. One box covers every
+/// state of a button, so pressing it doesn't shift the art.
+enum ButtonArt {
+    /// Loads each file at its pixel size, trimmed to the opaque box shared by
+    /// all images of the same pixel size. Missing files come back nil.
+    static func load(_ paths: [String?]) -> [NSImage?] {
+        let images: [CGImage?] = paths.map { path in
+            guard let path, let image = NSImage(contentsOfFile: path) else { return nil }
+            return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
+        // Keyed by pixel width and height.
+        var boxes: [[Int]: CGRect] = [:]
+        for case let image? in images {
+            let size = [image.width, image.height]
+            guard let box = opaqueBounds(image) else { continue }
+            boxes[size] = boxes[size].map { $0.union(box) } ?? box
+        }
+        return images.map { image in
+            guard let image else { return nil }
+            let size = [image.width, image.height]
+            let cropped = boxes[size].flatMap { image.cropping(to: $0) } ?? image
+            return NSImage(cgImage: cropped, size: NSSize(width: cropped.width, height: cropped.height))
+        }
+    }
+
+    /// Smallest rect, in pixels with a top-left origin, holding every pixel
+    /// that isn't fully transparent. Nil for a blank image.
+    static func opaqueBounds(_ image: CGImage) -> CGRect? {
+        let width = image.width, height = image.height
+        guard width > 0, height > 0,
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // Row 0 of the bitmap is the top of the image.
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for y in 0..<height {
+            for x in 0..<width where data[(y * width + x) * 4 + 3] > 0 {
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= 0 else { return nil }
+        return CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+    }
+}
+
 enum TrafficLightType {
     case close
     case minimize
@@ -562,7 +612,6 @@ class OverlayWindow: NSWindow {
     }
 
     private func loadImageForState(_ state: String) {
-        let defaults = UserDefaults.standard
         let baseKey: String
         switch buttonType {
         case .close: baseKey = "closeButton"
@@ -572,12 +621,7 @@ class OverlayWindow: NSWindow {
             baseKey = windowIsZoomed ? "restoreButton" : "zoomButton"
         }
 
-        let key = baseKey + state + "Image"
-
-        if let path = defaults.string(forKey: key),
-           let file = NSImage(contentsOfFile: path) {
-            // Normalize image size to pixel dimensions (ignore DPI)
-            normalizeImageSize(file)
+        if let file = trimmedImage(baseKey, state: state) {
             let image = coveringSystemButton(file)
             imageView.image = image
             // Update size based on image if this is the normal state
@@ -586,16 +630,11 @@ class OverlayWindow: NSWindow {
             }
         } else if state.isEmpty {
             // Fallback: try zoom button images if restore not available
-            if windowIsZoomed {
-                let fallbackKey = "zoomButton" + state + "Image"
-                if let path = defaults.string(forKey: fallbackKey),
-                   let file = NSImage(contentsOfFile: path) {
-                    normalizeImageSize(file)
-                    let image = coveringSystemButton(file)
-                    imageView.image = image
-                    updateImageSize(image.size)
-                    return
-                }
+            if windowIsZoomed, let file = trimmedImage("zoomButton", state: state) {
+                let image = coveringSystemButton(file)
+                imageView.image = image
+                updateImageSize(image.size)
+                return
             }
             // Only fall back to default for normal state
             let defaultImage = createDefaultImage()
@@ -605,15 +644,15 @@ class OverlayWindow: NSWindow {
         // For hover/pressed, if no image, keep current image
     }
 
-    private func normalizeImageSize(_ image: NSImage) {
-        // Set image size to match pixel dimensions, ignoring DPI metadata
-        if let rep = image.representations.first {
-            let pixelWidth = rep.pixelsWide
-            let pixelHeight = rep.pixelsHigh
-            if pixelWidth > 0 && pixelHeight > 0 {
-                image.size = NSSize(width: pixelWidth, height: pixelHeight)
-            }
-        }
+    /// The image for `baseKey` in `state`, trimmed to the box shared by all of
+    /// that button's states. Zoom and restore share one box.
+    private func trimmedImage(_ baseKey: String, state: String) -> NSImage? {
+        let defaults = UserDefaults.standard
+        let bases = buttonType == .zoom ? ["zoomButton", "restoreButton"] : [baseKey]
+        let states = ["", "Hover", "Pressed", "Disabled"]
+        let keys = bases.flatMap { base in states.map { base + $0 + "Image" } }
+        guard let index = keys.firstIndex(of: baseKey + state + "Image") else { return nil }
+        return ButtonArt.load(keys.map { defaults.string(forKey: $0) })[index]
     }
 
     /// Scales an image smaller than the system button's circle up until it covers

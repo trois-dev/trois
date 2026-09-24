@@ -38,6 +38,11 @@ struct Theme: Identifiable, Hashable {
     }
 }
 
+/// How an engine name reads under a theme. Kaleidoscope called its themes schemes.
+func engineLabel(_ engine: String) -> String {
+    engine.hasPrefix("Kaleidoscope") ? "\(engine) scheme" : engine
+}
+
 // Optional theme.json in a theme folder. Catalog themes always have one.
 struct ThemeManifest: Codable {
     var name: String?
@@ -47,7 +52,7 @@ struct ThemeManifest: Codable {
     var source: String?
     // Button key to image path relative to the theme folder.
     var buttons: [String: String]?
-    // Button keys, and frame.inactive / frame.pressed, that the Custom tab
+    // Button keys, and frame.inactive / frame.pressed, that the Editor tab
     // made from another image and remakes when that image changes.
     var generated: [String]?
 }
@@ -149,7 +154,7 @@ class ThemeManager: ObservableObject {
     }
 
     private func scanDirectory(_ directory: URL) -> [Theme] {
-        // Hidden folders include the Custom tab's draft.
+        // Hidden folders include the Editor tab's draft.
         guard let contents = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else {
             return []
         }
@@ -384,9 +389,15 @@ class ThemeManager: ObservableObject {
         themes.first { $0.path.standardizedFileURL.path == folder.standardizedFileURL.path }
     }
 
-    /// The installed theme with this catalog id, if any.
-    func installedTheme(named folderName: String) -> Theme? {
-        installedTheme(at: themesDirectory.appendingPathComponent(folderName))
+    /// Themes in the themes folder by folder name, which is the catalog id
+    /// for catalog themes.
+    func installedThemesByFolder() -> [String: Theme] {
+        let folder = themesDirectory.standardizedFileURL.path
+        var result: [String: Theme] = [:]
+        for theme in themes where theme.path.standardizedFileURL.deletingLastPathComponent().path == folder {
+            result[theme.path.lastPathComponent] = theme
+        }
+        return result
     }
 
     // Themes used to ship inside the app, and an applied one stored image

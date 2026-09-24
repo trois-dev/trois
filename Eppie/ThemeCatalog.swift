@@ -217,7 +217,7 @@ final class ThemeCatalog: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var loadError: String?
     @Published private(set) var installing: Set<String> = []
-    // Shown by the Get Themes tab.
+    // Shown by the Gallery tab.
     @Published var installError: String?
 
     private var pendingLoads: [(Result<[CatalogTheme], Error>) -> Void] = []
@@ -262,9 +262,10 @@ final class ThemeCatalog: ObservableObject {
         }.resume()
     }
 
-    /// Downloads, checks, installs and applies a catalog theme. Calls
-    /// completion on main. Unless `quiet`, failures also set installError.
-    func install(_ id: String, quiet: Bool = false, completion: ((Result<Theme, Error>) -> Void)? = nil) {
+    /// Downloads, checks and installs a catalog theme, and applies it unless
+    /// `apply` is false. Calls completion on main. Unless `quiet`, failures
+    /// also set installError.
+    func install(_ id: String, apply: Bool = true, quiet: Bool = false, completion: ((Result<Theme, Error>) -> Void)? = nil) {
         guard Self.isValidID(id), !installing.contains(id) else { return }
         installing.insert(id)
         let done: (Result<Theme, Error>) -> Void = { result in
@@ -283,9 +284,15 @@ final class ThemeCatalog: ObservableObject {
                     done(.failure(ThemeInstallError.notInCatalog))
                     return
                 }
-                self.download(entry, done)
+                self.download(entry, apply: apply, done)
             }
         }
+    }
+
+    /// Installs newer versions of these themes without changing which theme
+    /// is applied.
+    func update(_ ids: [String]) {
+        ids.forEach { install($0, apply: false) }
     }
 
     /// A catalog-relative path as a URL on the catalog's own host.
@@ -295,7 +302,7 @@ final class ThemeCatalog: ObservableObject {
         return url
     }
 
-    private func download(_ entry: CatalogTheme, _ completion: @escaping (Result<Theme, Error>) -> Void) {
+    private func download(_ entry: CatalogTheme, apply: Bool, _ completion: @escaping (Result<Theme, Error>) -> Void) {
         guard entry.size <= ThemeInstaller.maxArchiveBytes else {
             completion(.failure(ThemeInstallError.tooLarge))
             return
@@ -331,7 +338,10 @@ final class ThemeCatalog: ObservableObject {
                     guard let theme = themeManager.installedTheme(at: folder) else {
                         return .failure(ThemeInstallError.noButtons)
                     }
-                    themeManager.applyTheme(theme)
+                    // The applied theme is applied again so windows pick up its new images.
+                    if apply || themeManager.currentTheme?.id == theme.id {
+                        themeManager.applyTheme(theme)
+                    }
                     return .success(theme)
                 }
                 completion(installed)

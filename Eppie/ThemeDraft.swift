@@ -1,4 +1,4 @@
-// The Custom tab's draft theme: its files, frame sync, derived states and checks.
+// The Editor tab's draft theme: its files, frame sync, derived states and checks.
 import Cocoa
 import UniformTypeIdentifiers
 
@@ -18,6 +18,17 @@ struct DraftCheck: Identifiable {
     let id: String
     let message: String
     let fixes: [(title: String, fix: Fix)]
+}
+
+/// The theme.json fields the Editor tab edits.
+struct DraftInfo: Equatable {
+    var name = ""
+    var author = ""
+    var version = 1
+    // Web page for the theme, saved as "source".
+    var source = ""
+    // Where the art came from. Shown, not edited.
+    var engine: String?
 }
 
 extension ThemeManager {
@@ -52,7 +63,7 @@ extension ThemeManager {
 
     // MARK: - Draft
 
-    /// The working copy the Custom tab edits. Hidden from the theme list and
+    /// The working copy the Editor tab edits. Hidden from the theme list and
     /// applied like any theme, so edits show on real windows right away.
     var draftDirectory: URL {
         themesDirectory.appendingPathComponent(".draft", isDirectory: true)
@@ -71,10 +82,39 @@ extension ThemeManager {
         snapshotLiveIntoDraft()
     }
 
-    /// Clears every image and frame, live and in the draft.
+    /// Clears every image and frame, live and in the draft. The theme's
+    /// name and other info stay.
     func resetDraft() {
+        let info = draftInfo()
         clearTheme()
         snapshotLiveIntoDraft()
+        setDraftInfo(info)
+    }
+
+    func draftInfo() -> DraftInfo {
+        let manifest = readManifest(in: draftDirectory)
+        return DraftInfo(name: manifest?.name ?? "", author: manifest?.author ?? "", version: manifest?.version ?? 1,
+                         source: manifest?.source ?? "", engine: manifest?.engine)
+    }
+
+    /// Writes the info to the draft's theme.json. Doesn't reapply the draft,
+    /// so typing doesn't reload every overlay.
+    func setDraftInfo(_ info: DraftInfo) {
+        ensureDraft()
+        var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
+        func text(_ s: String) -> String? {
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let name = text(info.name), author = text(info.author), source = text(info.source)
+        guard manifest.name != name || manifest.author != author || manifest.version != info.version
+            || manifest.source != source else { return }
+        manifest.name = name
+        manifest.author = author
+        manifest.version = info.version
+        manifest.source = source
+        try? writeManifest(manifest, to: draftDirectory)
+        if isDraftApplied { currentTheme = draftTheme() }
     }
 
     /// Puts an image in one draft slot, or clears the slot when `source` is
@@ -184,6 +224,7 @@ extension ThemeManager {
         ensureDraft()
         let frame = draftDirectory.appendingPathComponent("frame", isDirectory: true)
         try? fileManager.removeItem(at: frame)
+        try? fileManager.removeItem(at: layoutBaseline)
         if let directory {
             do {
                 try fileManager.copyItem(at: directory, to: frame)
@@ -217,6 +258,51 @@ extension ThemeManager {
         saveDraft(manifest)
     }
 
+    // The draft frame's layout as it came in, so edge edits can be reverted.
+    // Kept beside the frame folder, not in it, and left out of saved themes.
+    private var layoutBaseline: URL { draftDirectory.appendingPathComponent(".layout-original.json") }
+
+    /// Replaces one side's runs in the draft frame's layout, then applies the
+    /// draft. Returns why the runs weren't used.
+    @discardableResult
+    func setDraftEdgeRuns(_ runs: [(Int, Int)], for side: WindowFrame.Side) -> String? {
+        guard let directory = draftFrameDirectory, let frame = WindowFrame(directory: directory) else {
+            return "This theme has no window frame."
+        }
+        guard frame.k1 == nil else { return "1.x frames have a fixed layout." }
+        if let error = WindowFrame.runError(runs, extent: frame.extent(side)) { return error }
+        saveLayoutBaseline()
+        guard WindowFrame.writeRuns(runs, for: side, in: directory) else { return "Couldn't write the layout." }
+        saveDraft(readManifest(in: draftDirectory) ?? ThemeManifest())
+        return nil
+    }
+
+    /// Puts one side's runs back as they were when the frame came in.
+    func revertDraftEdgeRuns(_ side: WindowFrame.Side) {
+        guard let original = baselineRuns(side) else { return }
+        setDraftEdgeRuns(original, for: side)
+    }
+
+    /// Whether a side's runs differ from when the frame came in.
+    func draftEdgeRunsChanged(_ side: WindowFrame.Side) -> Bool {
+        guard let original = baselineRuns(side), let directory = draftFrameDirectory,
+              let frame = WindowFrame(directory: directory) else { return false }
+        return !original.elementsEqual(frame.runs(side), by: ==)
+    }
+
+    private func baselineRuns(_ side: WindowFrame.Side) -> [(Int, Int)]? {
+        guard let data = try? Data(contentsOf: layoutBaseline),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let layout = json["layout"] as? [String: Any] else { return nil }
+        return (layout[side.rawValue] as? [[Int]] ?? []).compactMap { $0.count == 2 ? ($0[0], $0[1]) : nil }
+    }
+
+    // Copies the frame's layout.json aside, once per frame.
+    private func saveLayoutBaseline() {
+        guard !fileManager.fileExists(atPath: layoutBaseline.path), let directory = draftFrameDirectory else { return }
+        try? fileManager.copyItem(at: directory.appendingPathComponent("layout.json"), to: layoutBaseline)
+    }
+
     /// What's wrong with the draft's frame, if anything.
     func draftChecks() -> [DraftCheck] {
         guard let directory = draftFrameDirectory else { return [] }
@@ -240,6 +326,15 @@ extension ThemeManager {
             } else {
                 checks.append(DraftCheck(id: "pressed", message: "No pressed strip. Buttons in the frame won't look pressed.",
                                          fixes: [("Generate", .generateFrameArt(.pressed))]))
+            }
+        }
+
+        if frame.k1 == nil {
+            for side in WindowFrame.Side.allCases {
+                for (n, warning) in frame.runWarnings(side).enumerated() {
+                    checks.append(DraftCheck(id: "runs-\(side.rawValue)-\(n)",
+                                             message: "\(side.rawValue.capitalized) edge: \(warning)", fixes: []))
+                }
             }
         }
 
@@ -270,15 +365,21 @@ extension ThemeManager {
         let manifest = readManifest(in: draftDirectory)
         var theme = Theme(id: draftDirectory.path, name: manifest?.name ?? "Custom Theme", path: draftDirectory)
         theme.author = manifest?.author
+        theme.version = manifest?.version
+        theme.engine = manifest?.engine
+        theme.source = manifest?.source.flatMap { URL(string: $0) }
         applyManifestButtons(manifest?.buttons ?? [:], in: draftDirectory, to: &theme)
         theme.frameDirectory = frameDirectory(in: draftDirectory)
         return theme
     }
 
-    /// Copies the draft, frame included, into a new theme folder.
-    func saveCustomTheme(name: String, author: String?) -> String? {
+    /// Copies the draft, frame included, into a new theme folder named after
+    /// the draft's name.
+    func saveCustomTheme() -> String? {
         ensureDraft()
-        guard var manifest = readManifest(in: draftDirectory), manifest.buttons?.isEmpty == false else { return nil }
+        guard let manifest = readManifest(in: draftDirectory),
+              manifest.buttons?.isEmpty == false || draftFrameDirectory != nil else { return nil }
+        let name = manifest.name ?? "Custom Theme"
 
         // Create safe folder name
         let safeName = name.replacingOccurrences(of: "[^a-zA-Z0-9_\\- ]", with: "", options: .regularExpression)
@@ -296,9 +397,7 @@ extension ThemeManager {
 
         do {
             try fileManager.copyItem(at: draftDirectory, to: destDir)
-            manifest.name = name
-            manifest.author = author
-            try writeManifest(manifest, to: destDir)
+            try? fileManager.removeItem(at: destDir.appendingPathComponent(layoutBaseline.lastPathComponent))
             return destDir.path
         } catch {
             print("Failed to save custom theme: \(error)")
@@ -336,7 +435,9 @@ extension ThemeManager {
             if let frame = defaults.string(forKey: "windowFrameDirectory"), fileManager.fileExists(atPath: frame) {
                 try fileManager.copyItem(atPath: frame, toPath: staging.appendingPathComponent("frame").path)
             }
-            let manifest = ThemeManifest(name: currentTheme?.name, author: currentTheme?.author, buttons: buttons)
+            let manifest = ThemeManifest(name: currentTheme?.name, author: currentTheme?.author, version: currentTheme?.version,
+                                         engine: currentTheme?.engine, source: currentTheme?.source?.absoluteString,
+                                         buttons: buttons)
             try writeManifest(manifest, to: staging)
             try? fileManager.removeItem(at: draftDirectory)
             try fileManager.moveItem(at: staging, to: draftDirectory)
@@ -556,6 +657,17 @@ enum PixelOps {
         let placed = fit(CGSize(width: button.width, height: button.height), in: rect)
         context.draw(button, in: flip(placed, height: height))
         context.restoreGState()
+        return context.makeImage()
+    }
+
+    /// `image` flipped across its top-left to bottom-right diagonal, so a
+    /// side band reads left to right like the top one.
+    static func transposed(_ image: CGImage) -> CGImage? {
+        let width = image.height, height = image.width
+        guard let context = context(width, height) else { return nil }
+        // Maps source (x, y) to (y, x), both top-left.
+        context.concatenate(CGAffineTransform(a: 0, b: -1, c: -1, d: 0, tx: CGFloat(width), ty: CGFloat(height)))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         return context.makeImage()
     }
 

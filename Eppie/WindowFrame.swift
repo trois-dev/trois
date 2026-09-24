@@ -13,9 +13,15 @@ struct WindowFrame {
         case close = 1, zoom = 2, collapse = 3
     }
 
+    // The four edge lists. Raw values are the layout.json keys.
+    enum Side: String, CaseIterable {
+        case top, bottom, left, right
+        var horizontal: Bool { self == .top || self == .bottom }
+    }
+
     let directory: URL
     // Tells apart two reads of the same folder, whose files may have changed.
-    let identity = UUID()
+    private(set) var identity = UUID()
     let active: CGImage
     let inactive: CGImage
     let pressed: CGImage?
@@ -23,10 +29,10 @@ struct WindowFrame {
     // Rectangle codes to rects: 0 content, 1 close, 2 zoom, 3 collapse, 4 title text.
     let rects: [Int: CGRect]
     // Edge lists as (part code, cumulative end offset).
-    let top: [(Int, Int)]
-    let bottom: [(Int, Int)]
-    let left: [(Int, Int)]
-    let right: [(Int, Int)]
+    private(set) var top: [(Int, Int)]
+    private(set) var bottom: [(Int, Int)]
+    private(set) var left: [(Int, Int)]
+    private(set) var right: [(Int, Int)]
     // Set for 1.x schemes, which follow fixed rules instead of a layout.
     let k1: K1Parts?
 
@@ -134,6 +140,126 @@ struct WindowFrame {
         return (source, horizontal)
     }
 
+    // MARK: - Edge runs
+
+    func runs(_ side: Side) -> [(Int, Int)] {
+        switch side {
+        case .top: return top
+        case .bottom: return bottom
+        case .left: return left
+        case .right: return right
+        }
+    }
+
+    /// Length of a side's list in image pixels.
+    func extent(_ side: Side) -> Int {
+        Int(side.horizontal ? size.width : size.height)
+    }
+
+    /// The strip of the image a side's runs are cut from, as drawn by
+    /// drawHorizontal and drawVertical.
+    func band(_ side: Side) -> CGRect {
+        let c = content
+        switch side {
+        case .top: return CGRect(x: 0, y: 0, width: size.width, height: c.minY)
+        case .bottom: return CGRect(x: 0, y: c.maxY, width: size.width, height: size.height - c.maxY)
+        case .left: return CGRect(x: 0, y: 0, width: c.minX, height: size.height)
+        case .right: return CGRect(x: c.maxX, y: 0, width: size.width - c.maxX, height: size.height)
+        }
+    }
+
+    /// A copy with `side`'s runs replaced, for previewing edits unsaved.
+    func with(_ side: Side, runs: [(Int, Int)]) -> WindowFrame {
+        var copy = self
+        switch side {
+        case .top: copy.top = runs
+        case .bottom: copy.bottom = runs
+        case .left: copy.left = runs
+        case .right: copy.right = runs
+        }
+        copy.identity = UUID()
+        return copy
+    }
+
+    /// Why `runs` can't be a side's list, if it can't.
+    static func runError(_ runs: [(Int, Int)], extent: Int) -> String? {
+        if runs.isEmpty { return "An edge needs at least one run." }
+        var position = 0
+        for (_, end) in runs {
+            if end < position { return "Runs must end in order along the edge." }
+            position = end
+        }
+        if position > extent { return "The last run ends past the image (\(extent) px)." }
+        return nil
+    }
+
+    /// Things in a side's list that likely draw wrong. `runs` stands in for
+    /// the side's current list.
+    func runWarnings(_ side: Side, runs list: [(Int, Int)]? = nil) -> [String] {
+        let list = list ?? runs(side)
+        var out: [String] = []
+        var position = 0
+        var spans: [(code: Int, start: Int, end: Int)] = []
+        for (code, end) in list {
+            spans.append((code, position, max(end, position)))
+            position = max(end, position)
+        }
+        for widget in Widget.allCases {
+            let codes = [Part.with(widget), Part.without(widget)]
+            let runs = spans.filter { codes.contains($0.code) && $0.end > $0.start }
+            guard !runs.isEmpty else { continue }
+            guard let rect = rects[widget.rawValue], !rect.isEmpty else {
+                out.append("A \(Self.widgetName(widget)) run has no \(Self.widgetName(widget)) box in the layout.")
+                continue
+            }
+            guard Self.side(of: rect, content: content) == side else { continue }
+            let low = Int(side.horizontal ? rect.minX : rect.minY)
+            let high = Int(side.horizontal ? rect.maxX : rect.maxY)
+            let withRuns = runs.filter { $0.code == Part.with(widget) }
+            if !withRuns.isEmpty && !withRuns.contains(where: { $0.start <= low && $0.end >= high }) {
+                out.append("The \(Self.widgetName(widget)) run doesn't cover its box (\(low)-\(high) px).")
+            }
+        }
+        if spans.contains(where: { $0.code == Part.title }) && rects[4] == nil {
+            out.append("A title run with no title box in the layout.")
+        }
+        if !spans.contains(where: { (Part.grows.contains($0.code) || Part.fills.contains($0.code)) && $0.end > $0.start }) {
+            out.append("Nothing on this edge grows, so bigger windows leave a gap.")
+        }
+        return out
+    }
+
+    /// The side a widget rect sits on, following backdrop(for:).
+    static func side(of rect: CGRect, content: CGRect) -> Side? {
+        if rect.midY < content.minY { return .top }
+        if rect.midY > content.maxY { return .bottom }
+        if rect.midX < content.minX { return .left }
+        if rect.midX > content.maxX { return .right }
+        return nil
+    }
+
+    private static func widgetName(_ widget: Widget) -> String {
+        switch widget {
+        case .close: return "close"
+        case .zoom: return "zoom"
+        case .collapse: return "minimize"
+        }
+    }
+
+    /// Replaces one side's list in the layout.json in `directory`. Other keys,
+    /// rects and "source" included, are kept as they are.
+    static func writeRuns(_ runs: [(Int, Int)], for side: Side, in directory: URL) -> Bool {
+        let url = directory.appendingPathComponent("layout.json")
+        guard let data = try? Data(contentsOf: url),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["format"] as? String != "k1",
+              var layout = json["layout"] as? [String: Any] else { return false }
+        layout[side.rawValue] = runs.map { [$0.0, $0.1] }
+        json["layout"] = layout
+        guard let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return false }
+        return (try? out.write(to: url, options: .atomic)) != nil
+    }
+
     // MARK: - Layout
 
     /// Where things landed for one window size.
@@ -146,6 +272,22 @@ struct WindowFrame {
         // origin. Leaves out the window and transparent parts of the art.
         // Filled in by render().
         var shape: [CGRect] = []
+        // Where each side's runs landed, in order along the side.
+        var runs: [Side: [PlacedRun]] = [:]
+    }
+
+    /// One drawn piece of a run. Positions are points along the side from
+    /// the frame's top or left edge.
+    struct PlacedRun {
+        // Index into the side's list.
+        let run: Int
+        // How it drew, which can differ from the list: an end gap no other
+        // band draws is drawn as a cap.
+        let code: Int
+        let start: CGFloat
+        let length: CGFloat
+        // Pixels of art it drew from, the size of one tile.
+        let sourceLength: Int
     }
 
     private struct Segment {
@@ -159,13 +301,33 @@ struct WindowFrame {
     }
 
     // Part codes. See K2 Intro, chapter 3.
-    private enum Part {
+    enum Part {
         static let edge = 0, endCap = 1, close = 2, zoom = 3, collapse = 4
         static let title = 5, titleCap = 6, stretch = 8, crumple = 10, stretchEnd = 11
         static let period = 12, periodFill = 13, periodFillEnd = 14
         static let noClose = 15, noZoom = 16, noCollapse = 17, scale = 18
+        // Not in wnd#: a widget cut out of its section, never drawn. Unlike an
+        // edge part it still counts as part of the band, so the band doesn't
+        // end early when a widget fills the end of it.
+        static let cut = -1
         static let grows: Set<Int> = [stretch, stretchEnd, period, scale]
         static let fills: Set<Int> = [periodFill, periodFillEnd]
+
+        static func with(_ widget: Widget) -> Int {
+            switch widget {
+            case .close: return close
+            case .zoom: return zoom
+            case .collapse: return collapse
+            }
+        }
+
+        static func without(_ widget: Widget) -> Int {
+            switch widget {
+            case .close: return noClose
+            case .zoom: return noZoom
+            case .collapse: return noCollapse
+            }
+        }
     }
 
     /// Splits an edge list into drawn segments and places them along `length`
@@ -198,7 +360,7 @@ struct WindowFrame {
         var segments = all.filter { segment in
             guard segment.length > 0 else { return false }
             switch segment.code {
-            case Part.edge: return false
+            case Part.edge, Part.cut: return false
             case Part.close: return widgets.contains(.close)
             case Part.noClose: return !widgets.contains(.close)
             case Part.zoom: return widgets.contains(.zoom)
@@ -283,14 +445,71 @@ struct WindowFrame {
     }
 
     /// Places the widgets and title for a window of `windowSize` points.
-    func layout(windowSize: CGSize, widgets: Set<Widget>, titleWidth: CGFloat?) -> Layout {
+    /// `hidden` are widgets the window has whose buttons draw elsewhere.
+    func layout(windowSize: CGSize, widgets: Set<Widget>, hidden: Set<Widget> = [], titleWidth: CGFloat?) -> Layout {
         let insets = self.insets
         let size = CGSize(width: windowSize.width + insets.left + insets.right,
                           height: windowSize.height + insets.top + insets.bottom)
-        let sides = sides(outer: size, widgets: widgets, titleWidth: titleWidth)
-        return Layout(size: size,
-                      widgets: widgetRects(sides, outer: size, widgets: widgets),
-                      title: titleRect(sides.top))
+        let sides = sides(outer: size, widgets: widgets, cut: cutOut(hidden).subtracting(widgets), titleWidth: titleWidth)
+        var layout = Layout(size: size,
+                            widgets: widgetRects(sides, outer: size, widgets: widgets),
+                            title: titleRect(sides.top))
+        let width = Int(self.size.width), height = Int(self.size.height)
+        layout.runs = [.top: placed(sides.top, top, extent: width), .bottom: placed(sides.bottom, bottom, extent: width),
+                       .left: placed(sides.left, left, extent: height), .right: placed(sides.right, right, extent: height)]
+        return layout
+    }
+
+    /// Matches drawn segments back to the runs they came from. A segment's
+    /// source range always lies inside its run, cut out widgets included.
+    private func placed(_ segments: [Segment], _ list: [(Int, Int)], extent: Int) -> [PlacedRun] {
+        var bounds: [(Int, Int)] = []
+        var position = 0
+        for (_, border) in list {
+            let end = min(max(border, position), extent)
+            bounds.append((position, end))
+            position = end
+        }
+        return segments.compactMap { s in
+            guard let i = bounds.firstIndex(where: { $0.0 <= s.start && s.start < $0.1 }) else { return nil }
+            return PlacedRun(run: i, code: s.code, start: CGFloat(s.outStart), length: CGFloat(s.outLength), sourceLength: s.length)
+        }
+    }
+
+    /// Hidden widgets whose sections stay with the button cut out of them.
+    /// Schemes can hold art for a window without a widget (the no close, no
+    /// zoom and no collapse parts); that's used when present. Most schemes
+    /// leave some out, since Mac OS 8 document windows always had all three,
+    /// and dropping the whole section can cut away the frame's structure,
+    /// like the end of a title tab. Widgets drawn by a part that's always
+    /// drawn, like an end cap, have no section to drop and stay as they are.
+    private func cutOut(_ hidden: Set<Widget>) -> Set<Widget> {
+        let codes = Set((top + bottom + left + right).map(\.0))
+        return hidden.filter { codes.contains(Part.with($0)) && !codes.contains(Part.without($0)) }
+    }
+
+    /// Splits each widget's section in `list` around the widget, grown by a
+    /// point for its shadow. Layout drops the widget's span, so the art on
+    /// either side closes up.
+    private func cutting(_ list: [(Int, Int)], _ cut: Set<Widget>, horizontal: Bool) -> [(Int, Int)] {
+        var out: [(Int, Int)] = []
+        var position = 0
+        for (code, border) in list {
+            let end = max(border, position)
+            defer { position = end }
+            guard let widget = cut.first(where: { Part.with($0) == code }), let rect = rects[widget.rawValue] else {
+                out.append((code, border))
+                continue
+            }
+            let low = max(position, Int(horizontal ? rect.minX : rect.minY) - 1)
+            let high = min(end, Int(horizontal ? rect.maxX : rect.maxY) + 1)
+            guard low < high else {
+                out.append((code, border))
+                continue
+            }
+            out += [(code, low), (Part.cut, high), (code, end)]
+        }
+        return out
     }
 
     private struct Sides {
@@ -308,21 +527,32 @@ struct WindowFrame {
     // the bottom band's corners. They draw as fixed pieces. Other end parts,
     // above the content or in the top corners, can hold widget art for windows
     // that have those widgets, so they stay undrawn.
-    private func sides(outer: CGSize, widgets: Set<Widget>, titleWidth: CGFloat?) -> Sides {
+    // `cut` are widgets whose sections draw with the widget cut out.
+    private func sides(outer: CGSize, widgets: Set<Widget>, cut: Set<Widget> = [], titleWidth: CGFloat?) -> Sides {
         let width = Int(outer.width), height = Int(outer.height)
         let imageWidth = Int(size.width), imageHeight = Int(size.height)
         let content = self.content
         let besideContent = { (start: Int, end: Int) in start >= Int(content.minY) && end <= Int(content.maxY) }
         let bottomCorner = { (start: Int, end: Int) in end <= Int(content.minX) || start >= Int(content.maxX) }
+        // Each widget is cut from the edge it sits on.
+        func on(_ edge: (CGRect) -> Bool) -> Set<Widget> {
+            cut.filter { rects[$0.rawValue].map(edge) ?? false }
+        }
+        // A widget's section can show up on more than one edge; elsewhere it
+        // drops as it would for a window without the widget.
+        let topCut = on { $0.midY < content.minY }
+        let bottomCut = on { $0.midY > content.maxY }
+        let leftCut = on { $0.midY >= content.minY && $0.midY <= content.maxY && $0.midX < content.minX }
+        let rightCut = on { $0.midY >= content.minY && $0.midY <= content.maxY && $0.midX > content.maxX }
         return Sides(
-            top: layout(top, extent: imageWidth, length: width, widgets: widgets,
-                        titleWidth: titleWidth.map { Int(ceil($0)) }).segments,
-            bottom: layout(bottom, extent: imageWidth, length: width, widgets: widgets, titleWidth: nil,
-                           drawsEnd: bottomCorner).segments,
-            left: layout(left, extent: imageHeight, length: height, widgets: widgets, titleWidth: nil,
-                         drawsEnd: besideContent).segments,
-            right: layout(right, extent: imageHeight, length: height, widgets: widgets, titleWidth: nil,
-                          drawsEnd: besideContent).segments
+            top: layout(cutting(top, topCut, horizontal: true), extent: imageWidth, length: width,
+                        widgets: widgets.union(topCut), titleWidth: titleWidth.map { Int(ceil($0)) }).segments,
+            bottom: layout(cutting(bottom, bottomCut, horizontal: true), extent: imageWidth, length: width,
+                           widgets: widgets.union(bottomCut), titleWidth: nil, drawsEnd: bottomCorner).segments,
+            left: layout(cutting(left, leftCut, horizontal: false), extent: imageHeight, length: height,
+                         widgets: widgets.union(leftCut), titleWidth: nil, drawsEnd: besideContent).segments,
+            right: layout(cutting(right, rightCut, horizontal: false), extent: imageHeight, length: height,
+                          widgets: widgets.union(rightCut), titleWidth: nil, drawsEnd: besideContent).segments
         )
     }
 
@@ -383,8 +613,9 @@ struct WindowFrame {
     /// Draws the frame for a window of `windowSize` points into a new image
     /// at `scale` pixels per point. The window's own area stays clear.
     /// `cornerRadius` is the window's own corner rounding; the gaps it leaves
-    /// against the frame's square opening are filled in.
-    func render(windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>,
+    /// against the frame's square opening are filled in. `hidden` are widgets
+    /// the window has whose buttons draw elsewhere, at the traffic lights.
+    func render(windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>, hidden: Set<Widget> = [],
                 title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat) -> (CGImage, Layout)? {
         if let k1 {
             return renderK1(k1, windowSize: windowSize, active: isActive, widgets: widgets, title: title,
@@ -392,7 +623,7 @@ struct WindowFrame {
         }
         let titleAttributes = titleAttributes(active: isActive)
         let titleWidth = title.map { ($0 as NSString).size(withAttributes: titleAttributes).width + 8 }
-        let layout = layout(windowSize: windowSize, widgets: widgets, titleWidth: titleWidth)
+        let layout = layout(windowSize: windowSize, widgets: widgets, hidden: hidden, titleWidth: titleWidth)
         let width = Int(ceil(layout.size.width * scale))
         let height = Int(ceil(layout.size.height * scale))
         guard width > 0, height > 0,
@@ -409,7 +640,7 @@ struct WindowFrame {
         let insets = self.insets
 
         // Sides first, over the full height, then top and bottom over them.
-        let sides = sides(outer: outer, widgets: widgets, titleWidth: titleWidth)
+        let sides = sides(outer: outer, widgets: widgets, cut: cutOut(hidden).subtracting(widgets), titleWidth: titleWidth)
         drawVertical(sides.left, from: image, sourceX: 0, width: Int(content.minX), destX: 0, in: context)
         drawVertical(sides.right, from: image, sourceX: Int(content.maxX), width: Int(insets.right),
                      destX: Int(outer.width - insets.right), in: context)
@@ -421,12 +652,7 @@ struct WindowFrame {
         let hole = CGRect(x: insets.left, y: insets.top, width: windowSize.width, height: windowSize.height)
         context.clear(hole)
         if cornerRadius > 0, let color = innerEdgeColor(image) {
-            let corners = CGMutablePath()
-            corners.addRect(hole)
-            corners.addRoundedRect(in: hole, cornerWidth: cornerRadius, cornerHeight: cornerRadius)
-            context.addPath(corners)
-            context.setFillColor(color)
-            context.fillPath(using: .evenOdd)
+            fillCorners(of: hole, radius: cornerRadius, color: color, in: context)
         }
 
         if let pressedWidget, let pressed, let rect = layout.widgets[pressedWidget], let source = pressedSource(pressedWidget) {
@@ -535,6 +761,35 @@ struct WindowFrame {
     }
 
     // The frame pixel just left of the content, halfway down.
+    // Points the corner fill reaches under the window's edge.
+    private static let cornerOverlap: CGFloat = 2
+
+    /// Fills the gaps a window's rounded corners leave against the square
+    /// opening. The fill's curve sits inside the window's own, so the window's
+    /// antialiased edge blends over solid color; two matching soft edges would
+    /// let the desktop show through. Only the corner squares are filled, and
+    /// the window covers the overlap where it's opaque.
+    func fillCorners(of hole: CGRect, radius: CGFloat, color: CGColor, in context: CGContext) {
+        let r = min(radius, hole.width / 2, hole.height / 2)
+        let overlap = min(Self.cornerOverlap, r)
+        guard r > 0 else { return }
+        context.saveGState()
+        context.clip(to: [
+            CGRect(x: hole.minX, y: hole.minY, width: r, height: r),
+            CGRect(x: hole.maxX - r, y: hole.minY, width: r, height: r),
+            CGRect(x: hole.minX, y: hole.maxY - r, width: r, height: r),
+            CGRect(x: hole.maxX - r, y: hole.maxY - r, width: r, height: r),
+        ])
+        let corners = CGMutablePath()
+        corners.addRect(hole)
+        corners.addRoundedRect(in: hole.insetBy(dx: overlap, dy: overlap),
+                               cornerWidth: r - overlap, cornerHeight: r - overlap)
+        context.addPath(corners)
+        context.setFillColor(color)
+        context.fillPath(using: .evenOdd)
+        context.restoreGState()
+    }
+
     private func innerEdgeColor(_ image: CGImage) -> CGColor? {
         let x = max(0, Int(content.minX) - 1)
         guard let pixel = image.cropping(to: CGRect(x: x, y: Int(content.midY), width: 1, height: 1)),

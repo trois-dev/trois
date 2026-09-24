@@ -32,11 +32,13 @@ enum FramePreviewRenderer {
     }()
     private static let queue = DispatchQueue(label: "Trois.framepreview", qos: .userInitiated, attributes: .concurrent)
 
-    /// Identifies one rendering. The art's modification date is part of it, so
-    /// a reinstalled theme draws again.
+    /// Identifies one rendering. The art's and layout's modification dates
+    /// are part of it, so a reinstalled or edited frame draws again.
     static func key(directory: URL, title: String, frameButtons: Bool) -> String {
-        let art = directory.appendingPathComponent("active.png").path
-        let modified = (try? FileManager.default.attributesOfItem(atPath: art)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let modified = ["active.png", "layout.json"].map { name -> TimeInterval in
+            let path = directory.appendingPathComponent(name).path
+            return (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        }
         return "\(directory.path)|\(modified)|\(title)|\(frameButtons)"
     }
 
@@ -62,10 +64,11 @@ enum FramePreviewRenderer {
         let i = frame.insets
         let window = CGSize(width: max(minimumWindow.width, canvas.width - i.left - i.right),
                             height: max(minimumWindow.height, canvas.height - i.top - i.bottom))
-        // Same widgets as BorderTarget: all three when the frame holds the buttons.
-        let widgets: Set<WindowFrame.Widget> = frameButtons ? Set(WindowFrame.Widget.allCases) : []
+        // Same widgets as BorderTarget: all three, in the frame or at the traffic lights.
+        let all = Set(WindowFrame.Widget.allCases)
         guard let (image, layout) = frame.render(
-            windowSize: window, active: true, widgets: widgets, title: title, pressedWidget: nil,
+            windowSize: window, active: true, widgets: frameButtons ? all : [], hidden: frameButtons ? [] : all,
+            title: title, pressedWidget: nil,
             cornerRadius: cornerRadius, scale: scale
         ) else { return nil }
         return FramePreviewImage(image: image, size: layout.size,
