@@ -12,6 +12,9 @@ struct ButtonFrames: Equatable {
 // window-server latency without AX reads. AX is only read when a window is
 // first seen or its size changes. A periodic scan picks up new and closed
 // windows and focus changes.
+//
+// Overlays can't be ordered directly above another app's window, so they stay
+// floating and are clipped wherever a window in front of their target covers them.
 class MultiWindowTracker {
     // False follows only the focused window of the frontmost app.
     private let allWindows: Bool
@@ -23,6 +26,11 @@ class MultiWindowTracker {
     private var settleWork: [CGWindowID: DispatchWorkItem] = [:]
     private var refreshWork: [CGWindowID: DispatchWorkItem] = [:]
     private var scanTimer: Timer?
+    private var scanQueued = false
+    // Normal-level windows of other apps, front to back, and their frames in
+    // global top-left coordinates. Used to clip overlays that are covered.
+    private var stack: [CGWindowID] = []
+    private var frames: [CGWindowID: CGRect] = [:]
     private var mouseMonitor: Any?
 
     // Motion is considered over this long after the last move event.
@@ -53,14 +61,13 @@ class MultiWindowTracker {
             object: nil
         )
 
-        // A click can focus another window of the same app, which posts no
-        // workspace notification. The app focuses it after the click, so check
-        // a few times shortly after instead of waiting for the next scan.
-        if !allWindows {
-            mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
-                for delay in [0.03, 0.1, 0.25] {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.scan() }
-                }
+        // A click can raise a window or focus another window of the same app,
+        // which posts no workspace notification. The app does that after the
+        // click, so check a few times shortly after instead of waiting for the
+        // next scan.
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+            for delay in [0.03, 0.1, 0.25] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.scan() }
             }
         }
 
@@ -85,6 +92,8 @@ class MultiWindowTracker {
         WindowServerEvents.handler = nil
         WindowServerEvents.subscribe([])
         subscribed = []
+        stack = []
+        frames = [:]
 
         for wid in Array(overlayManagers.keys) {
             removeWindow(wid)
@@ -107,16 +116,39 @@ class MultiWindowTracker {
         scan()
     }
 
+    // Coalesces bursts of requests into one scan on the next run loop pass.
+    private func queueScan() {
+        guard !scanQueued else { return }
+        scanQueued = true
+        DispatchQueue.main.async { [weak self] in
+            self?.scanQueued = false
+            self?.scan()
+        }
+    }
+
     // MARK: - Window-server events
 
     private func handle(event: UInt32, wid: CGWindowID) {
+        // A raise changes which windows cover which. Rebuild the stack from
+        // the window list rather than guessing where the window landed.
+        // Reorders fire for menus and tooltips too; only normal windows matter.
+        if event == WindowServerEvents.reordered {
+            if frames[wid] != nil {
+                queueScan()
+            }
+            return
+        }
         guard let manager = overlayManagers[wid] else { return }
         switch event {
         case WindowServerEvents.moved:
             windowMoved(wid, manager: manager)
         case WindowServerEvents.resized:
-            if !draggingWindows.contains(wid), let frame = WindowServer.bounds(of: wid) {
-                manager.follow(targetFrame: frame)
+            if let frame = WindowServer.bounds(of: wid) {
+                frames[wid] = frame
+                if !draggingWindows.contains(wid) {
+                    manager.follow(targetFrame: frame)
+                }
+                updateClipping()
             }
             scheduleRefresh(wid)
         case WindowServerEvents.destroyed:
@@ -128,13 +160,19 @@ class MultiWindowTracker {
     }
 
     private func windowMoved(_ wid: CGWindowID, manager: OverlayManager) {
+        let frame = WindowServer.bounds(of: wid)
+        if let frame {
+            frames[wid] = frame
+        }
         if UserDefaults.standard.bool(forKey: "hideButtonsOnDrag") {
             if draggingWindows.insert(wid).inserted {
                 manager.hideOverlays()
             }
-        } else if let frame = WindowServer.bounds(of: wid) {
+        } else if let frame {
             manager.follow(targetFrame: frame)
         }
+        // The moved window may now cover or uncover buttons of windows behind it.
+        updateClipping()
         scheduleSettle(wid)
     }
 
@@ -155,6 +193,7 @@ class MultiWindowTracker {
                 manager.follow(targetFrame: frame)
             }
             manager.showOverlays()
+            updateClipping()
         }
         manager.syncAppKitFrames()
     }
@@ -167,6 +206,8 @@ class MultiWindowTracker {
             self.refreshWork[wid] = nil
             guard !self.draggingWindows.contains(wid) else { return }
             self.overlayManagers[wid]?.refresh()
+            // A new button image or position needs its clip recomputed.
+            self.updateClipping()
         }
         refreshWork[wid] = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay, execute: work)
@@ -185,6 +226,8 @@ class MultiWindowTracker {
         let focusedWID = allWindows ? nil : focusedWindowID()
 
         var candidates: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
+        var newStack: [CGWindowID] = []
+        var newFrames: [CGWindowID: CGRect] = [:]
 
         for info in infoList {
             guard let wid = info[kCGWindowNumber as String] as? CGWindowID,
@@ -194,12 +237,23 @@ class MultiWindowTracker {
             }
             // Skip our own windows and system UI (layer != 0)
             if pid == myPID || layer != 0 { continue }
+
+            guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: boundsDict) else {
+                continue
+            }
+
+            // Any visible normal window can cover buttons, tracked or not.
+            let alpha = info[kCGWindowAlpha as String] as? Double ?? 1
+            if alpha > 0 {
+                newStack.append(wid)
+                newFrames[wid] = frame
+            }
+
             if !allWindows && wid != focusedWID { continue }
 
             // Skip windows without real bounds
-            guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
-                  let frame = CGRect(dictionaryRepresentation: boundsDict),
-                  frame.width > 50 && frame.height > 50 else {
+            guard frame.width > 50 && frame.height > 50 else {
                 continue
             }
 
@@ -210,6 +264,15 @@ class MultiWindowTracker {
             }
 
             candidates.append((wid, pid, frame))
+        }
+
+        stack = newStack
+        frames = newFrames
+        // Windows in motion have fresher frames from their events.
+        for wid in settleWork.keys {
+            if let frame = WindowServer.bounds(of: wid) {
+                frames[wid] = frame
+            }
         }
 
         let now = CFAbsoluteTimeGetCurrent()
@@ -254,6 +317,18 @@ class MultiWindowTracker {
         }
         rejected = rejected.filter { seen.contains($0.key) }
         updateSubscription()
+        updateClipping()
+    }
+
+    // Clips each window's overlays to the parts not covered by windows in front of it.
+    private func updateClipping() {
+        var covers: [CGRect] = []
+        for wid in stack {
+            overlayManagers[wid]?.clip(covering: covers)
+            if let frame = frames[wid] {
+                covers.append(frame)
+            }
+        }
     }
 
     private func removeWindow(_ wid: CGWindowID) {

@@ -64,6 +64,14 @@ class OverlayManager {
         }
     }
 
+    /// Clips each overlay to the part not covered by `covers`, the frames of
+    /// windows in front of the target in global top-left coordinates.
+    func clip(covering covers: [CGRect]) {
+        closeOverlay?.clip(covering: covers)
+        minimizeOverlay?.clip(covering: covers)
+        zoomOverlay?.clip(covering: covers)
+    }
+
     /// Brings AppKit's cached frames in line after window-server moves.
     func syncAppKitFrames() {
         closeOverlay?.syncAppKitFrame()
@@ -236,6 +244,8 @@ class OverlayWindow: NSWindow {
     // Set after a window-server move AppKit didn't see. AppKit's cached frame
     // keeps the old origin until syncAppKitFrame().
     private var appKitStale = false
+    // Covered parts currently masked out, in view coordinates. Nil forces an update.
+    private var clipRects: [CGRect]? = []
 
     init(buttonType: TrafficLightType) {
         self.buttonType = buttonType
@@ -372,6 +382,7 @@ class OverlayWindow: NSWindow {
 
         imageSize = pixelSize
         imageView.frame = NSRect(origin: .zero, size: pixelSize)
+        clipRects = nil
         setContentSize(pixelSize)
         // Re-center on button position
         repositionOnCenter()
@@ -454,6 +465,40 @@ class OverlayWindow: NSWindow {
     func move(center: CGPoint) {
         buttonCenter = center
         repositionOnCenter()
+    }
+
+    /// Masks out the parts covered by `covers` (global top-left frames). Clicks
+    /// fall through the masked parts because they draw nothing.
+    func clip(covering covers: [CGRect]) {
+        let frame = CGRect(origin: origin(centeredOn: buttonCenter), size: imageSize)
+        let bounds = CGRect(origin: .zero, size: imageSize)
+        // Flip each covered part into the view's bottom-left coordinates.
+        let covered: [CGRect] = covers.compactMap { cover in
+            let part = cover.intersection(frame)
+            guard !part.isNull, !part.isEmpty else { return nil }
+            return CGRect(x: part.minX - frame.minX, y: frame.maxY - part.maxY, width: part.width, height: part.height)
+        }
+        guard covered != clipRects, let layer = imageView.layer else { return }
+        clipRects = covered
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if covered.isEmpty {
+            layer.mask = nil
+        } else {
+            var visible = CGPath(rect: bounds, transform: nil)
+            for part in covered {
+                visible = visible.subtracting(CGPath(rect: part, transform: nil))
+            }
+            let mask = CAShapeLayer()
+            mask.frame = bounds
+            mask.path = visible
+            layer.mask = mask
+        }
+        CATransaction.commit()
+
+        // Fully covered overlays must not catch clicks meant for the covering window.
+        ignoresMouseEvents = covered.contains { $0.contains(bounds) }
     }
 
     /// Tells AppKit where the window server already has the overlay. Deferred

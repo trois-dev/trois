@@ -67,10 +67,13 @@ enum WindowServer {
 
 // Window-server notifications, registered process-wide like JankyBorders does.
 // Moved and resized only fire for windows in the interest list set by subscribe().
+// stackd saw reordered go quiet once an interest list is set; here it fired for
+// every raise in testing, and the periodic scan covers it if it doesn't.
 enum WindowServerEvents {
     static let destroyed: UInt32 = 804
     static let moved: UInt32 = 806
     static let resized: UInt32 = 807
+    static let reordered: UInt32 = 808
 
     // Called on the main thread with (event, wid).
     static var handler: ((UInt32, CGWindowID) -> Void)?
@@ -87,7 +90,7 @@ enum WindowServerEvents {
               SkyLight.requestNotifications != nil,
               SkyLight.cid != 0 else { return }
         var ok = true
-        for event in [destroyed, moved, resized] {
+        for event in [destroyed, moved, resized, reordered] {
             ok = register(notifyProc, event, nil) == 0 && ok
         }
         isAvailable = ok
@@ -102,7 +105,7 @@ enum WindowServerEvents {
         }
     }
 
-    // Payload for all three events starts with the uint32 window id.
+    // Payload for all four events starts with the uint32 window id.
     private static let notifyProc: SkyLight.NotifyProc = { event, data, length, _ in
         guard let data, length >= 4 else { return }
         let wid = CGWindowID(data.loadUnaligned(as: UInt32.self))
