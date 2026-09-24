@@ -325,21 +325,35 @@ struct CatalogCard: View {
         }
     }
 
+    private var plainWindow: AnyView {
+        AnyView(PlainWindowPreview(previewSize: previewSize, buttons: buttons))
+    }
+
     private var preview: AnyView {
-        showsWindow ? AnyView(PlainWindowPreview(previewSize: previewSize, buttons: buttons)) : AnyView(buttons)
+        guard showsWindow else { return AnyView(buttons) }
+        guard let frame = entry.frame, let url = catalog.url(for: frame.image) else { return plainWindow }
+        return AnyView(CatalogFramePreview(frame: frame, url: url, title: entry.name, fallback: plainWindow))
     }
 }
 
-/// Catalog button previews, kept so cards scrolled back into view don't
-/// download them again.
-enum CatalogPreviewCache {
-    private static let cache = NSCache<NSURL, NSImage>()
+/// Catalog previews, kept so cards scrolled back into view don't download
+/// them again.
+final class CatalogPreviewCache {
+    static let buttons = CatalogPreviewCache(countLimit: 0)
+    // A decoded frame is about 300 KB. Only cards near the visible ones need to stay.
+    static let frames = CatalogPreviewCache(countLimit: 300)
 
-    static func cached(_ url: URL) -> NSImage? {
+    private let cache = NSCache<NSURL, NSImage>()
+
+    private init(countLimit: Int) {
+        cache.countLimit = countLimit
+    }
+
+    func cached(_ url: URL) -> NSImage? {
         cache.object(forKey: url as NSURL)
     }
 
-    static func load(_ url: URL) async -> NSImage? {
+    func load(_ url: URL) async -> NSImage? {
         if let hit = cached(url) { return hit }
         guard let (data, response) = try? await URLSession.shared.data(from: url),
               (response as? HTTPURLResponse)?.statusCode ?? 200 == 200,
@@ -358,7 +372,7 @@ struct CatalogButtonImage: View {
 
     var body: some View {
         Group {
-            if let image = image ?? url.flatMap(CatalogPreviewCache.cached) {
+            if let image = image ?? url.flatMap(CatalogPreviewCache.buttons.cached) {
                 Image(nsImage: image)
                     .interpolation(.none)
             } else {
@@ -367,9 +381,92 @@ struct CatalogButtonImage: View {
         }
         .task(id: url) {
             if let url {
-                image = await CatalogPreviewCache.load(url)
+                image = await CatalogPreviewCache.buttons.load(url)
             }
         }
+    }
+}
+
+/// A catalog theme's frame, laid out like FramePreviewView: the window, the
+/// frame image over it with the buttons already drawn in, and the title.
+/// Frames bigger than the canvas are centered and clipped.
+struct CatalogFramePreview: View {
+    let frame: CatalogFrame
+    let url: URL
+    let title: String
+    // Shown when the index's geometry is unusable or the image won't load.
+    let fallback: AnyView
+    @State private var image: NSImage?
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if failed {
+                fallback
+            } else if let size = frame.pointSize, let window = frame.windowRect {
+                framed(size: size, window: window, image: image ?? CatalogPreviewCache.frames.cached(url))
+            } else {
+                fallback
+            }
+        }
+        .frame(width: FramePreviewRenderer.canvas.width, height: FramePreviewRenderer.canvas.height)
+        .clipped()
+        .task(id: url) {
+            image = await CatalogPreviewCache.frames.load(url)
+            failed = image == nil
+        }
+    }
+
+    private func framed(size: CGSize, window: CGRect, image: NSImage?) -> some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .frame(width: window.width, height: window.height)
+                .offset(x: window.minX, y: window.minY)
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.none)
+                    .frame(width: size.width, height: size.height)
+                if let box = frame.titleRect, let style = frame.title {
+                    titleText(style)
+                        .frame(width: box.width, height: box.height)
+                        .offset(x: box.minX, y: box.minY)
+                }
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    // Emboss is a copy one point down and right, like the website's text-shadow.
+    private func titleText(_ style: CatalogFrame.Title) -> some View {
+        func text(_ hex: String) -> some View {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Color(hex: hex) ?? .black)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        return ZStack {
+            if let emboss = style.emboss {
+                text(emboss).offset(x: 1, y: 1)
+            }
+            text(style.color)
+        }
+    }
+}
+
+private extension Color {
+    // "#rgb" or "#rrggbb".
+    init?(hex: String) {
+        var digits = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        if digits.count == 3 {
+            digits = digits.map { "\($0)\($0)" }.joined()
+        }
+        guard digits.count == 6, let value = UInt32(digits, radix: 16) else { return nil }
+        self.init(red: Double((value >> 16) & 0xff) / 255,
+                  green: Double((value >> 8) & 0xff) / 255,
+                  blue: Double(value & 0xff) / 255)
     }
 }
 
@@ -882,14 +979,9 @@ struct AboutView: View {
     }
 }
 
-// Tools and archives that themes come from. Add a line when a new engine or source lands.
+// Theme authors and the archives themes come from. Add an archive when a new source lands.
 struct CreditsView: View {
     @Environment(\.dismiss) private var dismiss
-
-    private static let engines: [(name: String, by: String)] = [
-        ("EppieDesktop", "Jeff Epstein, 1998-1999"),
-        ("Kaleidoscope", "Arlo Rose and Greg Landweber"),
-    ]
 
     private static let archives: [(name: String, url: String)] = [
         ("Virtual Plastic Eppie gallery", "https://www.virtualplastic.net/html/eppie.html"),
@@ -901,14 +993,10 @@ struct CreditsView: View {
             Text("Credits")
                 .font(.title2)
 
-            Text("Trois exists because of these tools and the people who made themes for them. It is not affiliated with any of them.")
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            section("Engines") {
-                ForEach(Self.engines, id: \.name) { engine in
-                    Text(engine.name).bold() + Text(" by \(engine.by)")
-                }
+            section("Themes") {
+                Text("Each theme is the work of the author named on it. If you made one and want it credited differently or removed, open an issue.")
+                    .fixedSize(horizontal: false, vertical: true)
+                Link("github.com/trois-dev/trois-themes/issues", destination: URL(string: "https://github.com/trois-dev/trois-themes/issues")!)
             }
 
             section("Theme Archives") {
@@ -919,10 +1007,9 @@ struct CreditsView: View {
                 }
             }
 
-            section("Themes") {
-                Text("Each theme is the work of the author named on it. If you made one and want it credited differently or removed, open an issue.")
+            section("Original Formats") {
+                Text("The themes were made for EppieDesktop (Jeff Epstein) and Kaleidoscope (Arlo Rose and Greg Landweber). Trois reads their files with its own code and is not affiliated with either.")
                     .fixedSize(horizontal: false, vertical: true)
-                Link("github.com/trois-dev/trois-themes/issues", destination: URL(string: "https://github.com/trois-dev/trois-themes/issues")!)
             }
 
             section("Injection Mode") {

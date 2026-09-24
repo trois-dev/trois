@@ -137,7 +137,7 @@ Kaleidoscope 1.x, drawn by Kaleidoscope's fixed 1.x rules:
 
 1. Write a converter that outputs button images and a `theme.json` with `engine` and `source` set.
 2. If the engine has window frames, write a `frame/` folder. Reuse the 2.x layout format if it fits; otherwise give `layout.json` a new `format` value and add a renderer next to `WindowFrameK1.swift`.
-3. Add a row to the table above, and credit the archive the themes came from in Credits below.
+3. Add a row to the table above, and credit the archive the themes came from below and in the app's Credits view (`CreditsView` in `SettingsView.swift`).
 
 ## Credits
 
