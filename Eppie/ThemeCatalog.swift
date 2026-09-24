@@ -14,10 +14,10 @@ enum ThemeInstallError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notInCatalog: return "That theme isn't in the Trois catalog."
-        case .catalogUnavailable(let reason): return "Couldn't load the theme catalog. \(reason)"
+        case .notInCatalog: return "That theme isn't in the Trois gallery."
+        case .catalogUnavailable(let reason): return "Couldn't load the theme gallery. \(reason)"
         case .download(let reason): return "Couldn't download the theme. \(reason)"
-        case .checksumMismatch: return "The downloaded theme didn't match the catalog, so it wasn't installed."
+        case .checksumMismatch: return "The downloaded theme didn't match the gallery, so it wasn't installed."
         case .tooLarge: return "The theme is too large."
         case .unsafeArchive(let reason): return "The theme wasn't installed: \(reason)"
         case .noButtons: return "No close, minimize or zoom images were found."
@@ -244,7 +244,7 @@ final class ThemeCatalog: ObservableObject {
             } else if let data, let index = try? JSONDecoder().decode(CatalogIndex.self, from: data), index.format == 1 {
                 result = .success(index.themes.filter { Self.isValidID($0.id) })
             } else {
-                result = .failure(ThemeInstallError.catalogUnavailable("The catalog couldn't be read."))
+                result = .failure(ThemeInstallError.catalogUnavailable("The gallery couldn't be read."))
             }
             DispatchQueue.main.async {
                 self.isLoading = false

@@ -137,21 +137,18 @@ Kaleidoscope 1.x, drawn by Kaleidoscope's fixed 1.x rules:
 
 1. Write a converter that outputs button images and a `theme.json` with `engine` and `source` set.
 2. If the engine has window frames, write a `frame/` folder. Reuse the 2.x layout format if it fits; otherwise give `layout.json` a new `format` value and add a renderer next to `WindowFrameK1.swift`.
-3. Add a row to the table above, and credit the tool and the archive below and in the app's Credits view (`SettingsView.swift`).
+3. Add a row to the table above, and credit the archive the themes came from in Credits below.
 
 ## Credits
 
-Trois exists because of these tools and the people who made themes for them. It is not affiliated with any of them.
-
-- **EppieDesktop** by Jeff Epstein (1998-1999)
-- **Kaleidoscope** by Arlo Rose and Greg Landweber
-
-Themes were collected from:
+Each theme is the work of the author named in its `theme.json`. They were collected from:
 
 - The [Virtual Plastic Eppie gallery](https://www.virtualplastic.net/html/eppie.html)
 - The kaleidoscope.net scheme archive, recovered from the [Internet Archive](https://web.archive.org/)
 
-Each theme is the work of the author named in its `theme.json`. If you made one and want it credited differently or removed, [open an issue](https://github.com/trois-dev/trois-themes/issues).
+The themes were made for EppieDesktop (Jeff Epstein) and Kaleidoscope (Arlo Rose and Greg Landweber). Trois reads their files with its own code and is not affiliated with either.
+
+If you made a theme and want it credited differently or removed, [open an issue](https://github.com/trois-dev/trois-themes/issues).
 
 Injection mode uses the same approach as [MacForge](https://github.com/MacEnhance/MacForge).
 

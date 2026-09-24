@@ -83,11 +83,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Template version of the app mark: three discs spaced by their radius, overlaps drawn lighter.
+    private static func menuBarImage() -> NSImage {
+        let r: CGFloat = 6
+        let xs: [CGFloat] = [6, 12, 18]
+        func disc(_ x: CGFloat) -> NSBezierPath {
+            NSBezierPath(ovalIn: NSRect(x: x - r, y: 0, width: r * 2, height: r * 2))
+        }
+        let image = NSImage(size: NSSize(width: 24, height: 12), flipped: false) { bounds in
+            // Outer discs only touch at one point, so each disc's neighbors never overlap inside it.
+            for (i, x) in xs.enumerated() {
+                NSGraphicsContext.saveGraphicsState()
+                disc(x).addClip()
+                let outsideNeighbors = NSBezierPath(rect: bounds)
+                outsideNeighbors.windingRule = .evenOdd
+                for j in [i - 1, i + 1] where xs.indices.contains(j) {
+                    outsideNeighbors.append(disc(xs[j]))
+                }
+                outsideNeighbors.addClip()
+                NSColor.black.setFill()
+                bounds.fill()
+                NSGraphicsContext.restoreGraphicsState()
+            }
+            for i in 0..<xs.count - 1 {
+                NSGraphicsContext.saveGraphicsState()
+                disc(xs[i]).addClip()
+                NSColor.black.withAlphaComponent(0.45).setFill()
+                disc(xs[i + 1]).fill()
+                NSGraphicsContext.restoreGraphicsState()
+            }
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "Trois"
+        return image
+    }
+
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "circle.grid.3x3.fill", accessibilityDescription: "Trois")
+            button.image = Self.menuBarImage()
         }
 
         let menu = NSMenu()
