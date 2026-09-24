@@ -97,13 +97,6 @@ final class BorderWindow {
     var shape: [CGRect] { layout?.shape ?? [] }
     private(set) var isVisible = false
 
-    var alphaValue: CGFloat = 1 {
-        didSet {
-            guard alphaValue != oldValue else { return }
-            applyAlpha()
-        }
-    }
-
     /// Hides every border while Mission Control or App Exposé shows. AppKit
     /// hides its own transient windows then, but not raw window-server ones.
     static var hiddenForMissionControl = false {
@@ -117,8 +110,7 @@ final class BorderWindow {
 
     private func applyAlpha() {
         guard !closed else { return }
-        let alpha = Self.hiddenForMissionControl ? 0 : alphaValue
-        _ = SkyLight.setWindowAlpha?(SkyLight.cid, windowNumber, Float(alpha))
+        _ = SkyLight.setWindowAlpha?(SkyLight.cid, windowNumber, Self.hiddenForMissionControl ? 0 : 1)
     }
 
     // Used where the window server doesn't report a radius, before macOS 26.
@@ -420,8 +412,7 @@ final class BorderWindow {
             trackingWidget = widget
             setPressed(widget)
         } else if event.clickCount == 2 {
-            // Double-clicking a title bar zooms, as on the Mac.
-            press(.zoom)
+            Self.doubleClickAction.map(press)
         } else {
             dragStart = (Self.mouseLocation(), targetFrame.origin)
         }
@@ -446,6 +437,19 @@ final class BorderWindow {
         trackingWidget = nil
         dragStart = nil
         setPressed(nil)
+    }
+
+    // The Desktop & Dock setting for double-clicking a title bar. "Fill" and
+    // "Maximize" both zoom here; the older bool key predates the menu.
+    private static var doubleClickAction: WindowFrame.Widget? {
+        // Standard defaults include the global domain these live in.
+        let defaults = UserDefaults.standard
+        switch defaults.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": return .collapse
+        case "None": return nil
+        case nil: return defaults.bool(forKey: "AppleMiniaturizeOnDoubleClick") ? .collapse : .zoom
+        default: return .zoom
+        }
     }
 
     private func setPressed(_ widget: WindowFrame.Widget?) {

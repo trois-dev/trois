@@ -25,7 +25,6 @@ class MultiWindowTracker {
     // and how many times in a row they failed.
     private var rejected: [CGWindowID: (at: CFAbsoluteTime, failures: Int)] = [:]
     private var subscribed: [CGWindowID] = []
-    private var draggingWindows: Set<CGWindowID> = []
     private var settleWork: [CGWindowID: DispatchWorkItem] = [:]
     private var refreshWork: [CGWindowID: DispatchWorkItem] = [:]
     private var resizeFollowUps: [CGWindowID: DispatchWorkItem] = [:]
@@ -265,11 +264,7 @@ class MultiWindowTracker {
         if let frame {
             frames[wid] = frame
         }
-        if UserDefaults.standard.bool(forKey: "hideButtonsOnDrag") {
-            if draggingWindows.insert(wid).inserted {
-                manager.hideOverlays()
-            }
-        } else if let frame {
+        if let frame {
             manager.follow(targetFrame: frame)
         }
         // The moved window may now cover or uncover buttons of windows behind it.
@@ -280,9 +275,7 @@ class MultiWindowTracker {
     private func windowResized(_ wid: CGWindowID, manager: OverlayManager) {
         guard let frame = WindowServer.bounds(of: wid) else { return }
         frames[wid] = frame
-        if !draggingWindows.contains(wid) {
-            manager.resize(targetFrame: frame)
-        }
+        manager.resize(targetFrame: frame)
         updateClipping()
     }
 
@@ -325,13 +318,6 @@ class MultiWindowTracker {
     private func settle(_ wid: CGWindowID) {
         settleWork[wid] = nil
         guard let manager = overlayManagers[wid] else { return }
-        if draggingWindows.remove(wid) != nil {
-            if let frame = WindowServer.bounds(of: wid) {
-                manager.follow(targetFrame: frame)
-            }
-            manager.showOverlays()
-            updateClipping()
-        }
         manager.syncAppKitFrames()
         // Buttons can move within a window without a resize, and not every app
         // reports it, so re-read them once motion stops.
@@ -344,7 +330,6 @@ class MultiWindowTracker {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.refreshWork[wid] = nil
-            guard !self.draggingWindows.contains(wid) else { return }
             self.overlayManagers[wid]?.refresh()
         }
         refreshWork[wid] = work
@@ -352,7 +337,7 @@ class MultiWindowTracker {
     }
 
     private func didRefresh(_ wid: CGWindowID, read: WindowRead, changed: Bool) {
-        guard let manager = overlayManagers[wid] else { return }
+        guard overlayManagers[wid] != nil else { return }
         switch read {
         case .timedOut:
             scheduleRefresh(wid, after: Self.rejectRetry)
@@ -371,10 +356,6 @@ class MultiWindowTracker {
             scheduleRefresh(wid)
         } else {
             followUpReads[wid] = nil
-        }
-        // A drag may have started while AX was read.
-        if draggingWindows.contains(wid) {
-            manager.hideOverlays()
         }
         // A new button image or position needs its clip recomputed.
         updateClipping()
@@ -646,7 +627,6 @@ class MultiWindowTracker {
         refreshWork[wid] = nil
         resizeFollowUps[wid]?.cancel()
         resizeFollowUps[wid] = nil
-        draggingWindows.remove(wid)
         buttonWatcher.unwatch(wid)
         windowPIDs[wid] = nil
         followUpReads[wid] = nil
@@ -736,18 +716,6 @@ class MultiWindowTracker {
     }
 
     // MARK: - Appearance
-
-    func hideAllOverlays() {
-        for (_, manager) in overlayManagers {
-            manager.hideOverlays()
-        }
-    }
-
-    func showAllOverlays() {
-        for (_, manager) in overlayManagers {
-            manager.showOverlays()
-        }
-    }
 
     func reloadAllImages() {
         for (_, manager) in overlayManagers {
