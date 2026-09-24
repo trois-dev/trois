@@ -109,14 +109,32 @@ struct TitleStyle: Equatable {
     var isEmpty: Bool { self == TitleStyle() }
 
     /// The font titles draw in. A family that isn't installed falls back to
-    /// the system font.
+    /// the system font. Safe off the main thread.
     var resolvedFont: NSFont {
         let size = min(max(self.size ?? Self.defaultSize, Self.sizes.lowerBound), Self.sizes.upperBound)
         let weight = self.weight ?? Self.defaultWeight
-        if let font, let family = NSFontManager.shared.font(withFamily: font, traits: [], weight: weight.manager, size: size) {
-            return family
-        }
-        return NSFont.systemFont(ofSize: size, weight: weight.system)
+        guard let font else { return NSFont.systemFont(ofSize: size, weight: weight.system) }
+        return Self.familyFont(font, weight: weight, size: size) ?? NSFont.systemFont(ofSize: size, weight: weight.system)
+    }
+
+    // NSFontManager picks the family member nearest the weight, which a font
+    // descriptor match doesn't always agree with. It isn't documented as
+    // thread-safe, so lookups run on main and are kept.
+    private static let fontLock = NSLock()
+    private static var familyFonts: [String: NSFont?] = [:]
+
+    private static func familyFont(_ family: String, weight: Weight, size: CGFloat) -> NSFont? {
+        let key = "\(family)|\(weight.rawValue)|\(size)"
+        fontLock.lock()
+        let cached = familyFonts[key]
+        fontLock.unlock()
+        if let cached { return cached }
+        let lookUp = { NSFontManager.shared.font(withFamily: family, traits: [], weight: weight.manager, size: size) }
+        let font = Thread.isMainThread ? lookUp() : DispatchQueue.main.sync(execute: lookUp)
+        fontLock.lock()
+        familyFonts[key] = font
+        fontLock.unlock()
+        return font
     }
 
     static func isInstalled(_ family: String) -> Bool {
