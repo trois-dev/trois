@@ -120,7 +120,6 @@ class OverlayManager {
                 targetFrame = frame
             }
             offsets = ButtonFrames()
-            // Ordered out rather than faded, so showOverlays() can't bring them back.
             closeOverlay?.orderOut(nil)
             minimizeOverlay?.orderOut(nil)
             zoomOverlay?.orderOut(nil)
@@ -232,6 +231,9 @@ class OverlayManager {
     func setActive(_ active: Bool) {
         isActive = active
         border?.setActive(active)
+        closeOverlay?.setWindowActive(active)
+        minimizeOverlay?.setWindowActive(active)
+        zoomOverlay?.setWindowActive(active)
     }
 
     /// Brings AppKit's cached frames in line after window-server moves.
@@ -286,6 +288,7 @@ class OverlayManager {
 
     private func makeOverlay(_ type: TrafficLightType) -> OverlayWindow {
         let overlay = OverlayWindow(buttonType: type)
+        overlay.setWindowActive(isActive)
         overlay.pressFailed = { [weak self] in
             guard let self else { return }
             self.pendingPress = type
@@ -337,7 +340,6 @@ class OverlayManager {
             }
             closeOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
             closeOverlay?.targetButton = snapshot.closeButton
-            closeOverlay?.alphaValue = 1
         } else {
             closeOverlay?.orderOut(nil)
         }
@@ -348,7 +350,6 @@ class OverlayManager {
             }
             minimizeOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
             minimizeOverlay?.targetButton = snapshot.minimizeButton
-            minimizeOverlay?.alphaValue = 1
         } else {
             minimizeOverlay?.orderOut(nil)
         }
@@ -360,7 +361,6 @@ class OverlayManager {
             zoomOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
             zoomOverlay?.targetButton = snapshot.zoomButton
             zoomOverlay?.setZoomedState(zoomed)
-            zoomOverlay?.alphaValue = 1
         } else {
             zoomOverlay?.orderOut(nil)
         }
@@ -385,7 +385,6 @@ class OverlayManager {
                                   close: snapshot.closeButton, minimize: snapshot.minimizeButton,
                                   zoom: snapshot.zoomButton)
         border?.update(target: target, pid: pid, frame: targetFrame)
-        border?.alphaValue = 1
     }
 
     /// Check if a window frame (global top-left) fills its screen, zoomed but not fullscreen
@@ -420,20 +419,6 @@ class OverlayManager {
         minimizeOverlay = nil
         zoomOverlay = nil
         border = nil
-    }
-
-    func hideOverlays() {
-        closeOverlay?.alphaValue = 0
-        minimizeOverlay?.alphaValue = 0
-        zoomOverlay?.alphaValue = 0
-        border?.alphaValue = 0
-    }
-
-    func showOverlays() {
-        closeOverlay?.alphaValue = 1
-        minimizeOverlay?.alphaValue = 1
-        zoomOverlay?.alphaValue = 1
-        border?.alphaValue = 1
     }
 
     func reloadImages() {
@@ -684,6 +669,8 @@ class OverlayWindow: NSWindow {
     private var imageSize: NSSize = NSSize(width: 14, height: 14)
     private var buttonCenter: CGPoint = .zero
     private var windowIsZoomed = false
+    // Background windows show the theme's disabled art while the mouse is away.
+    private var windowIsActive = true
     // Diameter of the system button's circle, which images must cover. The
     // system draws it 1pt inside the AX button frame: 14pt in a 16pt frame on
     // macOS 27, 12pt before.
@@ -746,8 +733,15 @@ class OverlayWindow: NSWindow {
         view.addTrackingArea(trackingArea!)
     }
 
+    /// The art for a button the mouse isn't on: normal, or disabled in a background window.
     func loadCustomImage() {
-        loadImageForState("")
+        loadImageForState(windowIsActive ? "" : "Disabled")
+    }
+
+    func setWindowActive(_ active: Bool) {
+        guard active != windowIsActive else { return }
+        windowIsActive = active
+        reloadImageForMouseState()
     }
 
     /// Reads the theme's files again after they changed.
@@ -805,10 +799,12 @@ class OverlayWindow: NSWindow {
 
         if let image = art(baseKey, state: state) {
             imageView.image = image
-            // Update size based on image if this is the normal state
-            if state.isEmpty {
+            // Update size based on image if this is a resting state
+            if state.isEmpty || state == "Disabled" {
                 updateImageSize(image.size)
             }
+        } else if state == "Disabled" {
+            loadImageForState("")
         } else if state.isEmpty {
             // Fallback: try zoom button images if restore not available
             if windowIsZoomed, let image = art("zoomButton", state: state) {
