@@ -2,8 +2,9 @@
 import Cocoa
 import SwiftUI
 import ApplicationServices
+import ServiceManagement
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var multiWindowTracker: MultiWindowTracker?
     private var settingsWindow: NSWindow?
@@ -28,6 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if sipDetector.sipDisabled {
             // Injection mode - no overlays needed
             setupAutoInject()
+            offerLoginItemOnce()
         } else {
             // Overlay mode - need accessibility permission
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -143,6 +145,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(allWindowsItem)
         }
 
+        let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        loginItem.tag = 300
+        menu.addItem(loginItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // Show current mode
@@ -167,7 +173,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem(title: "Quit Trois", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
+        menu.delegate = self
         statusItem.menu = menu
+    }
+
+    // The login item can be removed in System Settings, so its state is read each time the menu opens.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.item(withTag: 300)?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
+
+    @objc private func toggleLoginItem(_ sender: NSMenuItem) {
+        let service = SMAppService.mainApp
+        switch service.status {
+        case .enabled:
+            setLoginItem(false)
+        case .requiresApproval:
+            // Registered but switched off in System Settings, which is the only place to switch it back on.
+            SMAppService.openSystemSettingsLoginItems()
+        default:
+            setLoginItem(true)
+        }
+    }
+
+    private func setLoginItem(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            print("Trois: Could not change login item: \(error)")
+        }
+    }
+
+    // Asks once, after Trois is working, so it doesn't stack on the Accessibility prompt.
+    private func offerLoginItemOnce() {
+        let key = "offeredLoginItem"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        guard SMAppService.mainApp.status != .enabled else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            let alert = NSAlert()
+            alert.messageText = "Open Trois at login?"
+            alert.informativeText = "Trois can start when you log in so your theme is always on. You can change this later from the menu bar."
+            alert.addButton(withTitle: "Open at Login")
+            alert.addButton(withTitle: "Not Now")
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn {
+                self?.setLoginItem(true)
+            }
+        }
     }
 
     private func setupAutoInject() {
@@ -223,6 +280,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         multiWindowTracker?.startTracking()
 
         UserDefaults.standard.set(true, forKey: "troisEnabled")
+        offerLoginItemOnce()
 
         // Listen for image reload notifications
         NotificationCenter.default.addObserver(
