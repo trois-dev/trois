@@ -1,0 +1,295 @@
+// Manages app lifecycle and menu bar.
+import Cocoa
+import SwiftUI
+import ApplicationServices
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private var buttonTracker: WindowButtonTracker?
+    private var multiWindowTracker: MultiWindowTracker?
+    private var overlayManager: OverlayManager?
+    private var settingsWindow: NSWindow?
+    private var permissionCheckTimer: Timer?
+    private var appLaunchObserver: NSObjectProtocol?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Run as menu bar app (no dock icon)
+        NSApp.setActivationPolicy(.accessory)
+
+        // Check SIP status
+        let sipDetector = SIPDetector.shared
+        print("Trois: Running in \(sipDetector.mode) mode")
+
+        setupMenuBar()
+
+        // Set up mode based on SIP status
+        if sipDetector.sipDisabled {
+            // Injection mode - no overlays needed
+            setupAutoInject()
+        } else {
+            // Overlay mode - need accessibility permission
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.checkAndRequestPermission()
+            }
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Only terminate if user explicitly quits
+        return .terminateNow
+    }
+
+    private func checkAndRequestPermission() {
+        // Use native prompt - shows system dialog asking to open Settings
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        if AXIsProcessTrustedWithOptions(options) {
+            startTracking()
+            return
+        }
+
+        // Start polling for permission to be granted
+        startPermissionPolling()
+    }
+
+    private func startPermissionPolling() {
+        permissionCheckTimer?.invalidate()
+        permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            if AXIsProcessTrusted() {
+                self?.permissionCheckTimer?.invalidate()
+                self?.permissionCheckTimer = nil
+                // Only start overlay tracking in overlay mode
+                if !SIPDetector.shared.sipDisabled {
+                    self?.startTracking()
+                }
+                self?.updateMenuState()
+            }
+        }
+    }
+
+    private func setupMenuBar() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "circle.grid.3x3.fill", accessibilityDescription: "Trois")
+        }
+
+        let menu = NSMenu()
+
+        let enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "e")
+        enabledItem.state = UserDefaults.standard.bool(forKey: "troisEnabled") ? .on : .off
+        menu.addItem(enabledItem)
+
+        // All Windows toggle (overlay mode only)
+        if !SIPDetector.shared.sipDisabled {
+            let allWindowsItem = NSMenuItem(title: "All Windows", action: #selector(toggleAllWindows), keyEquivalent: "")
+            allWindowsItem.state = UserDefaults.standard.bool(forKey: "allWindowsMode") ? .on : .off
+            allWindowsItem.tag = 200
+            menu.addItem(allWindowsItem)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Show current mode
+        let modeItem = NSMenuItem(title: "Mode: \(SIPDetector.shared.sipDisabled ? "Injection" : "Overlay")", action: nil, keyEquivalent: "")
+        modeItem.isEnabled = false
+        menu.addItem(modeItem)
+
+
+        menu.addItem(NSMenuItem.separator())
+
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Show accessibility item if permission not granted
+        if !AXIsProcessTrusted() {
+            let accessibilityItem = NSMenuItem(title: "Grant Accessibility Access", action: #selector(requestAccessibilityPermission), keyEquivalent: "")
+            accessibilityItem.tag = 100  // Tag to find it later
+            menu.addItem(accessibilityItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        menu.addItem(NSMenuItem(title: "Quit Trois", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        statusItem.menu = menu
+    }
+
+    private func setupAutoInject() {
+        guard Injector.shared.canInject() else {
+            print("Trois: Cannot inject - tools not found")
+            return
+        }
+
+        // Initial injection into all running apps
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            Injector.shared.injectAll()
+        }
+
+        // Watch for new app launches
+        appLaunchObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard self != nil,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.activationPolicy == .regular,
+                  app.bundleIdentifier != Bundle.main.bundleIdentifier else {
+                return
+            }
+
+            // Delay injection slightly to let app initialize
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                let pid = app.processIdentifier
+                print("Trois: Auto-injecting into \(app.localizedName ?? "Unknown") (pid \(pid))")
+                _ = Injector.shared.inject(into: pid)
+            }
+        }
+    }
+
+    @objc private func toggleAllWindows(_ sender: NSMenuItem) {
+        let newState = sender.state != .on
+        sender.state = newState ? .on : .off
+        UserDefaults.standard.set(newState, forKey: "allWindowsMode")
+
+        // Restart tracking with new mode
+        if buttonTracker != nil || multiWindowTracker != nil {
+            stopTracking()
+            startTracking()
+        }
+    }
+
+    private func startTracking() {
+        let allWindowsMode = UserDefaults.standard.bool(forKey: "allWindowsMode")
+
+        if allWindowsMode {
+            // Multi-window mode - track all visible windows
+            multiWindowTracker = MultiWindowTracker()
+            multiWindowTracker?.startTracking()
+        } else {
+            // Single-window mode - track focused window only
+            overlayManager = OverlayManager()
+            buttonTracker = WindowButtonTracker(overlayManager: overlayManager!)
+            buttonTracker?.startTracking()
+        }
+
+        UserDefaults.standard.set(true, forKey: "troisEnabled")
+
+        // Listen for image reload notifications
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(reloadOverlayImages),
+            name: Notification.Name("TroisReloadImages"),
+            object: nil
+        )
+    }
+
+    @objc private func reloadOverlayImages() {
+        overlayManager?.reloadImages()
+        multiWindowTracker?.reloadAllImages()
+
+        // Also notify injected apps
+        if SIPDetector.shared.sipDisabled {
+            Injector.shared.notifyThemeChanged()
+        }
+    }
+
+    private func stopTracking() {
+        buttonTracker?.stopTracking()
+        buttonTracker = nil
+        overlayManager?.removeAllOverlays()
+        overlayManager = nil
+
+        multiWindowTracker?.stopTracking()
+        multiWindowTracker = nil
+
+        UserDefaults.standard.set(false, forKey: "troisEnabled")
+    }
+
+    @objc private func toggleEnabled(_ sender: NSMenuItem) {
+        if sender.state == .on {
+            sender.state = .off
+            if SIPDetector.shared.sipDisabled {
+                // Injection mode - nothing to stop (injected code stays in apps)
+                UserDefaults.standard.set(false, forKey: "troisEnabled")
+            } else {
+                stopTracking()
+            }
+        } else {
+            if SIPDetector.shared.sipDisabled {
+                // Injection mode - just mark as enabled, injection happens separately
+                sender.state = .on
+                UserDefaults.standard.set(true, forKey: "troisEnabled")
+            } else {
+                // Overlay mode - need accessibility permission
+                let trusted = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+                let options = [trusted: true] as CFDictionary
+                let accessEnabled = AXIsProcessTrustedWithOptions(options)
+
+                if accessEnabled {
+                    sender.state = .on
+                    startTracking()
+                }
+            }
+        }
+    }
+
+    @objc private func openSettings() {
+        if settingsWindow == nil {
+            let settingsView = SettingsView()
+            settingsWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            settingsWindow?.title = "Trois Settings"
+            settingsWindow?.contentView = NSHostingView(rootView: settingsView)
+            settingsWindow?.center()
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func requestAccessibilityPermission() {
+        if AXIsProcessTrusted() {
+            // Only start overlay tracking in overlay mode
+            if !SIPDetector.shared.sipDisabled {
+                startTracking()
+            }
+            updateMenuState()
+            return
+        }
+
+        // Open System Settings to Accessibility pane
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+
+        // Start polling (only matters for overlay mode)
+        if !SIPDetector.shared.sipDisabled {
+            startPermissionPolling()
+        }
+    }
+
+    private func updateMenuState() {
+        guard let menu = statusItem.menu else { return }
+        if let enabledItem = menu.item(withTitle: "Enabled") {
+            enabledItem.state = (buttonTracker != nil) ? .on : .off
+        }
+
+        // Remove accessibility item if permission granted
+        if AXIsProcessTrusted(), let accessItem = menu.item(withTag: 100) {
+            if let index = menu.items.firstIndex(of: accessItem) {
+                menu.removeItem(at: index)
+                // Remove the separator after it too
+                if index < menu.items.count, menu.items[index].isSeparatorItem {
+                    menu.removeItem(at: index)
+                }
+            }
+        }
+    }
+}

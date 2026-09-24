@@ -1,0 +1,31 @@
+# Build
+build/
+DerivedData/
+*.xcuserstate
+
+# Xcode
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# CocoaPods
+Pods/
+
+# Carthage
+Carthage/Build/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Injection tool build outputs
+*.o
+TroisInjector/com.trois.app.Injector
+TroisLoader/trois-inject
+TroisLoader/TroisLoader.bundle/Contents/MacOS/
