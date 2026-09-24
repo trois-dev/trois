@@ -228,12 +228,28 @@ struct ThemeEditorView: View {
             Picker("State", selection: $state) {
                 ForEach(PreviewState.allCases) { state in
                     Text(state.rawValue).tag(state)
+                        .disabled(!availableStates.contains(state))
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
         }
+        .onChange(of: selection) { _ in fitState() }
+        .onChange(of: frame?.identity) { _ in fitState() }
+    }
+
+    // States the selected part has art for. Frames have no hover art, and
+    // 1.x frames no pressed strip.
+    private var availableStates: [PreviewState] {
+        switch selection {
+        case .button: return PreviewState.allCases
+        case .frame: return frame?.k1 == nil ? [.active, .pressed, .inactive] : [.active, .inactive]
+        }
+    }
+
+    private func fitState() {
+        if !availableStates.contains(state) { state = .active }
     }
 
     private var footer: some View {
