@@ -86,6 +86,54 @@ struct WindowFrame {
         right = side("right")
     }
 
+    /// Size the pressed strip needs to hold every widget.
+    var pressedStripSize: CGSize {
+        let widgets = Widget.allCases.compactMap { rects[$0.rawValue] }
+        return CGSize(width: widgets.reduce(0) { $0 + $1.width }, height: widgets.map(\.height).max() ?? 0)
+    }
+
+    /// Art to paint behind a widget whose image is replaced: a piece of a
+    /// stretch or tile section on the same edge, on the widget's rows (its
+    /// columns on a side edge), clear of the widget itself. Tile it along
+    /// the edge, across the rows if `horizontal`.
+    func backdrop(for widget: Widget) -> (source: CGRect, horizontal: Bool)? {
+        guard let rect = rects[widget.rawValue], !rect.isEmpty else { return nil }
+        let list: [(Int, Int)]
+        let horizontal: Bool
+        if rect.midY < content.minY { list = top; horizontal = true }
+        else if rect.midY > content.maxY { list = bottom; horizontal = true }
+        else if rect.midX < content.minX { list = left; horizontal = false }
+        else if rect.midX > content.maxX { list = right; horizontal = false }
+        else { return nil }
+        let extent = horizontal ? size.width : size.height
+        let low = horizontal ? rect.minX : rect.minY
+        let high = horizontal ? rect.maxX : rect.maxY
+        let middle = (low + high) / 2
+        func distance(_ piece: (CGFloat, CGFloat)) -> CGFloat {
+            min(abs(piece.0 - middle), abs(piece.1 - middle))
+        }
+
+        var best: (CGFloat, CGFloat)?
+        var position = 0
+        for (code, border) in list {
+            let start = CGFloat(position)
+            position = min(max(border, position), Int(extent))
+            let end = CGFloat(position)
+            guard Part.grows.contains(code) || Part.fills.contains(code) else { continue }
+            // A widget can sit inside a stretch section; keep what's outside it.
+            for piece in [(start, min(end, low)), (max(start, high), end)] where piece.1 > piece.0 {
+                if best.map({ distance(piece) < distance($0) }) ?? true { best = piece }
+            }
+        }
+        guard let best else { return nil }
+        // Tiles repeat, so a short piece is enough.
+        let length = min(best.1 - best.0, 32)
+        let source = horizontal
+            ? CGRect(x: best.0, y: rect.minY, width: length, height: rect.height)
+            : CGRect(x: rect.minX, y: best.0, width: rect.width, height: length)
+        return (source, horizontal)
+    }
+
     // MARK: - Layout
 
     /// Where things landed for one window size.
@@ -500,7 +548,7 @@ struct WindowFrame {
 
     // The pressed strip holds close, zoom and collapse left to right at the
     // widths of their rects.
-    private func pressedSource(_ widget: Widget) -> CGRect? {
+    func pressedSource(_ widget: Widget) -> CGRect? {
         var x: CGFloat = 0
         for w in Widget.allCases {
             guard let rect = rects[w.rawValue] else { continue }

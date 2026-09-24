@@ -17,6 +17,13 @@ enum WindowFrameStore {
         }
         return cached
     }
+
+    /// Rereads the frame on next use. A folder's contents can change under
+    /// the same path, as the Custom tab's draft does.
+    static func invalidate() {
+        cachedPath = nil
+        cached = nil
+    }
 }
 
 /// What a border needs to know about its window, from an AX read.
@@ -106,7 +113,7 @@ final class BorderWindow {
     }
 
     // Used where the window server doesn't report a radius, before macOS 26.
-    private static let fallbackCornerRadius: CGFloat = {
+    static let fallbackCornerRadius: CGFloat = {
         if #available(macOS 26, *) { return 16 }
         return 10
     }()
@@ -157,7 +164,7 @@ final class BorderWindow {
     }
 
     func setFrame(_ frame: WindowFrame) {
-        guard frame.directory != windowFrame.directory else { return }
+        guard frame.identity != windowFrame.identity else { return }
         windowFrame = frame
         redraw()
         place()

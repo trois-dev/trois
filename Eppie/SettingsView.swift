@@ -25,7 +25,7 @@ struct SettingsView: View {
                 .tabItem { Label("Get Themes", systemImage: "arrow.down.circle") }
                 .tag(SettingsTab.getThemes)
 
-            ManualSettingsView()
+            ThemeEditorView()
                 .tabItem { Label("Custom", systemImage: "slider.horizontal.3") }
                 .tag(SettingsTab.custom)
 
@@ -433,152 +433,6 @@ struct ThemeCard<Preview: View>: View {
     }
 }
 
-struct ManualSettingsView: View {
-    @AppStorage("customThemeName") private var themeName = ""
-    @AppStorage("customThemeAuthor") private var themeAuthor = ""
-    @State private var showingSaveAlert = false
-    @State private var saveAlertMessage = ""
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 24) {
-                    // Button columns
-                    HStack(alignment: .top, spacing: 12) {
-                        ButtonColumnView(
-                            title: "Close",
-                            color: .red,
-                            keyPrefix: "close"
-                        )
-                        ButtonColumnView(
-                            title: "Minimize",
-                            color: .yellow,
-                            keyPrefix: "minimize"
-                        )
-                        ButtonColumnView(
-                            title: "Zoom",
-                            color: .green,
-                            keyPrefix: "zoom"
-                        )
-                        ButtonColumnView(
-                            title: "Help",
-                            color: .purple,
-                            keyPrefix: "help"
-                        )
-                    }
-                    .padding(.top, 8)
-
-                    Divider()
-
-                    // Theme info
-                    HStack(spacing: 16) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Theme Name")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            TextField("My Theme", text: $themeName)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Author")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            TextField("Your name", text: $themeAuthor)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                    }
-                }
-                .padding(.vertical)
-                .padding(.horizontal, 32)
-            }
-
-            Divider()
-
-            HStack {
-                Button("Reset All") {
-                    ThemeManager.shared.resetDraft()
-                }
-
-                Spacer()
-
-                Button("Save as Theme...") {
-                    saveCustomTheme()
-                }
-                .disabled(!hasCustomImages())
-            }
-            .padding(.vertical)
-            .padding(.horizontal, 32)
-        }
-        // Edits go to a draft copy of whatever is applied, frame included.
-        .onAppear { ThemeManager.shared.prepareDraft() }
-        .alert("Theme Saved", isPresented: $showingSaveAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(saveAlertMessage)
-        }
-    }
-
-    private func hasCustomImages() -> Bool {
-        let defaults = UserDefaults.standard
-        return defaults.string(forKey: "closeButtonImage") != nil ||
-               defaults.string(forKey: "minimizeButtonImage") != nil ||
-               defaults.string(forKey: "zoomButtonImage") != nil ||
-               defaults.string(forKey: "helpButtonImage") != nil
-    }
-
-    private func saveCustomTheme() {
-        let name = themeName.isEmpty ? "Custom Theme" : themeName
-        let author = themeAuthor.isEmpty ? nil : themeAuthor
-
-        if let savedPath = ThemeManager.shared.saveCustomTheme(name: name, author: author) {
-            saveAlertMessage = "Theme saved to:\n\(savedPath)"
-            showingSaveAlert = true
-            ThemeManager.shared.loadThemes()
-        } else {
-            saveAlertMessage = "Failed to save theme. Make sure you have at least one custom image."
-            showingSaveAlert = true
-        }
-    }
-}
-
-struct ButtonColumnView: View {
-    let title: String
-    let color: Color
-    let keyPrefix: String
-
-    private let states = [
-        ("Normal", ""),
-        ("Hover", "Hover"),
-        ("Pressed", "Pressed"),
-        ("Disabled", "Disabled")
-    ]
-
-    var body: some View {
-        VStack(spacing: 12) {
-            // Button title with colored dot
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 12, height: 12)
-                Text(title)
-                    .font(.headline)
-            }
-
-            // State slots
-            VStack(spacing: 8) {
-                ForEach(states, id: \.0) { state in
-                    ButtonStateSlot(
-                        stateName: state.0,
-                        userDefaultsKey: "\(keyPrefix)Button\(state.1)Image",
-                        fallbackColor: color
-                    )
-                }
-            }
-        }
-        .frame(width: 100)
-    }
-}
-
 struct ButtonStateSlot: View {
     let stateName: String
     let userDefaultsKey: String
@@ -586,6 +440,8 @@ struct ButtonStateSlot: View {
 
     @State private var imagePath: String = ""
     @State private var isHovering = false
+    // Made from the normal image; remade when it changes.
+    @State private var isGenerated = false
 
     var body: some View {
         VStack(spacing: 4) {
@@ -632,6 +488,9 @@ struct ButtonStateSlot: View {
             .onHover { hovering in
                 isHovering = hovering
             }
+            .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                loadDroppedFile(providers) { ThemeManager.shared.setDraftImage($0, forKey: userDefaultsKey) }
+            }
             .onAppear(perform: refresh)
             // Applying or resetting a theme changes the live paths.
             .onReceive(NotificationCenter.default.publisher(for: .init("TroisReloadImages"))) { _ in refresh() }
@@ -644,7 +503,18 @@ struct ButtonStateSlot: View {
                 Button("Select Image...") {
                     selectImage()
                 }
+                if ThemeManager.shared.canGenerateDraftImage(forKey: userDefaultsKey) {
+                    Button(isGenerated ? "Regenerate" : "Generate from Normal") {
+                        ThemeManager.shared.generateDraftImages(forKeys: [userDefaultsKey])
+                    }
+                }
             }
+
+            Text("auto")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .opacity(isGenerated ? 1 : 0)
+                .help("Made from the normal image. Updates when it changes.")
         }
     }
 
@@ -672,6 +542,7 @@ struct ButtonStateSlot: View {
 
     private func refresh() {
         imagePath = UserDefaults.standard.string(forKey: userDefaultsKey) ?? ""
+        isGenerated = ThemeManager.shared.isDraftImageGenerated(forKey: userDefaultsKey)
     }
 
     // Normalize image size to pixel dimensions, ignoring DPI metadata
@@ -754,6 +625,8 @@ struct AboutView: View {
             Text("Version 1.0")
                 .foregroundColor(.secondary)
 
+            Text("Classic window themes for a modern Mac.")
+
             Divider()
                 .frame(width: 200)
 
@@ -770,6 +643,7 @@ struct AboutView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            .font(.callout)
 
             Spacer()
 

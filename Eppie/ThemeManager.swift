@@ -10,18 +10,23 @@ struct Theme: Identifiable, Hashable {
     // From theme.json; catalog themes use it to offer updates.
     var version: Int?
     var closeUp: URL?
+    var closeHover: URL?
     var closeDown: URL?
     var closeDisabled: URL?
     var minimizeUp: URL?
+    var minimizeHover: URL?
     var minimizeDown: URL?
     var minimizeDisabled: URL?
     var maximizeUp: URL?
+    var maximizeHover: URL?
     var maximizeDown: URL?
     var maximizeDisabled: URL?
     var restoreUp: URL?
     var restoreDown: URL?
     var helpUp: URL?
+    var helpHover: URL?
     var helpDown: URL?
+    var helpDisabled: URL?
     // Kaleidoscope 2 window frame folder (frame/layout.json and images).
     var frameDirectory: URL?
 
@@ -31,12 +36,48 @@ struct Theme: Identifiable, Hashable {
 }
 
 // Optional theme.json in a theme folder. Catalog themes always have one.
-private struct ThemeManifest: Decodable {
-    let name: String?
-    let author: String?
-    let version: Int?
+struct ThemeManifest: Codable {
+    var name: String?
+    var author: String?
+    var version: Int?
     // Button key to image path relative to the theme folder.
-    let buttons: [String: String]?
+    var buttons: [String: String]?
+    // Button keys, and frame.inactive / frame.pressed, that the Custom tab
+    // made from another image and remakes when that image changes.
+    var generated: [String]?
+}
+
+/// One button image: the UserDefaults key the overlays read, its theme.json
+/// key and the file name it gets in a saved theme.
+struct ButtonSlot {
+    let defaultsKey: String
+    let manifestKey: String
+    let fileBase: String
+
+    static let all: [ButtonSlot] = [
+        ButtonSlot(defaultsKey: "closeButtonImage", manifestKey: "close", fileBase: "close_up"),
+        ButtonSlot(defaultsKey: "closeButtonHoverImage", manifestKey: "closeHover", fileBase: "close_hover"),
+        ButtonSlot(defaultsKey: "closeButtonPressedImage", manifestKey: "closeDown", fileBase: "close_down"),
+        ButtonSlot(defaultsKey: "closeButtonDisabledImage", manifestKey: "closeDisabled", fileBase: "close_disabled"),
+        ButtonSlot(defaultsKey: "minimizeButtonImage", manifestKey: "minimize", fileBase: "min_up"),
+        ButtonSlot(defaultsKey: "minimizeButtonHoverImage", manifestKey: "minimizeHover", fileBase: "min_hover"),
+        ButtonSlot(defaultsKey: "minimizeButtonPressedImage", manifestKey: "minimizeDown", fileBase: "min_down"),
+        ButtonSlot(defaultsKey: "minimizeButtonDisabledImage", manifestKey: "minimizeDisabled", fileBase: "min_disabled"),
+        ButtonSlot(defaultsKey: "zoomButtonImage", manifestKey: "zoom", fileBase: "max_up"),
+        ButtonSlot(defaultsKey: "zoomButtonHoverImage", manifestKey: "zoomHover", fileBase: "max_hover"),
+        ButtonSlot(defaultsKey: "zoomButtonPressedImage", manifestKey: "zoomDown", fileBase: "max_down"),
+        ButtonSlot(defaultsKey: "zoomButtonDisabledImage", manifestKey: "zoomDisabled", fileBase: "max_disabled"),
+        ButtonSlot(defaultsKey: "restoreButtonImage", manifestKey: "restore", fileBase: "res_up"),
+        ButtonSlot(defaultsKey: "restoreButtonPressedImage", manifestKey: "restoreDown", fileBase: "res_down"),
+        ButtonSlot(defaultsKey: "helpButtonImage", manifestKey: "help", fileBase: "help_up"),
+        ButtonSlot(defaultsKey: "helpButtonHoverImage", manifestKey: "helpHover", fileBase: "help_hover"),
+        ButtonSlot(defaultsKey: "helpButtonPressedImage", manifestKey: "helpDown", fileBase: "help_down"),
+        ButtonSlot(defaultsKey: "helpButtonDisabledImage", manifestKey: "helpDisabled", fileBase: "help_disabled")
+    ]
+
+    func fileName(extension ext: String) -> String {
+        ext.isEmpty ? fileBase : "\(fileBase).\(ext.lowercased())"
+    }
 }
 
 class ThemeManager: ObservableObject {
@@ -46,7 +87,7 @@ class ThemeManager: ObservableObject {
     @Published var currentTheme: Theme?
 
     let themesDirectory: URL
-    private let fileManager = FileManager.default
+    let fileManager = FileManager.default
     private let installQueue = DispatchQueue(label: "Trois.themeinstall", qos: .userInitiated)
 
     // Author mapping from VirtualPlastic.net gallery
@@ -103,7 +144,8 @@ class ThemeManager: ObservableObject {
     }
 
     private func scanDirectory(_ directory: URL) -> [Theme] {
-        guard let contents = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey]) else {
+        // Hidden folders include the Custom tab's draft.
+        guard let contents = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else {
             return []
         }
 
@@ -125,8 +167,7 @@ class ThemeManager: ObservableObject {
         let name = directory.lastPathComponent
         var theme = Theme(id: directory.path, name: name, path: directory)
 
-        if let data = try? Data(contentsOf: directory.appendingPathComponent("theme.json")),
-           let manifest = try? JSONDecoder().decode(ThemeManifest.self, from: data) {
+        if let manifest = readManifest(in: directory) {
             theme = Theme(id: directory.path, name: manifest.name ?? name, path: directory)
             theme.author = manifest.author
             theme.version = manifest.version
@@ -188,12 +229,23 @@ class ThemeManager: ObservableObject {
         return theme.hasAnyImage ? theme : nil
     }
 
-    private func frameDirectory(in directory: URL) -> URL? {
+    func readManifest(in directory: URL) -> ThemeManifest? {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("theme.json")) else { return nil }
+        return try? JSONDecoder().decode(ThemeManifest.self, from: data)
+    }
+
+    func writeManifest(_ manifest: ThemeManifest, to directory: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(manifest).write(to: directory.appendingPathComponent("theme.json"), options: .atomic)
+    }
+
+    func frameDirectory(in directory: URL) -> URL? {
         let frame = directory.appendingPathComponent("frame", isDirectory: true)
         return fileManager.fileExists(atPath: frame.appendingPathComponent("layout.json").path) ? frame : nil
     }
 
-    private func applyManifestButtons(_ buttons: [String: String], in directory: URL, to theme: inout Theme) {
+    func applyManifestButtons(_ buttons: [String: String], in directory: URL, to theme: inout Theme) {
         let root = directory.standardizedFileURL.path + "/"
         func file(_ key: String) -> URL? {
             guard let relative = buttons[key] else { return nil }
@@ -203,18 +255,23 @@ class ThemeManager: ObservableObject {
             return url
         }
         theme.closeUp = file("close")
+        theme.closeHover = file("closeHover")
         theme.closeDown = file("closeDown")
         theme.closeDisabled = file("closeDisabled")
         theme.minimizeUp = file("minimize")
+        theme.minimizeHover = file("minimizeHover")
         theme.minimizeDown = file("minimizeDown")
         theme.minimizeDisabled = file("minimizeDisabled")
         theme.maximizeUp = file("zoom")
+        theme.maximizeHover = file("zoomHover")
         theme.maximizeDown = file("zoomDown")
         theme.maximizeDisabled = file("zoomDisabled")
         theme.restoreUp = file("restore")
         theme.restoreDown = file("restoreDown")
         theme.helpUp = file("help")
+        theme.helpHover = file("helpHover")
         theme.helpDown = file("helpDown")
+        theme.helpDisabled = file("helpDisabled")
     }
 
     private func matchesPattern(_ filename: String, patterns: [String]) -> Bool {
@@ -345,16 +402,19 @@ class ThemeManager: ObservableObject {
 
         // Close button states
         defaults.set(theme.closeUp?.path, forKey: "closeButtonImage")
+        defaults.set(theme.closeHover?.path, forKey: "closeButtonHoverImage")
         defaults.set(theme.closeDown?.path, forKey: "closeButtonPressedImage")
         defaults.set(theme.closeDisabled?.path, forKey: "closeButtonDisabledImage")
 
         // Minimize button states
         defaults.set(theme.minimizeUp?.path, forKey: "minimizeButtonImage")
+        defaults.set(theme.minimizeHover?.path, forKey: "minimizeButtonHoverImage")
         defaults.set(theme.minimizeDown?.path, forKey: "minimizeButtonPressedImage")
         defaults.set(theme.minimizeDisabled?.path, forKey: "minimizeButtonDisabledImage")
 
         // Zoom/Maximize button states
         defaults.set(theme.maximizeUp?.path, forKey: "zoomButtonImage")
+        defaults.set(theme.maximizeHover?.path, forKey: "zoomButtonHoverImage")
         defaults.set(theme.maximizeDown?.path, forKey: "zoomButtonPressedImage")
         defaults.set(theme.maximizeDisabled?.path, forKey: "zoomButtonDisabledImage")
 
@@ -364,12 +424,15 @@ class ThemeManager: ObservableObject {
 
         // Help button states
         defaults.set(theme.helpUp?.path, forKey: "helpButtonImage")
+        defaults.set(theme.helpHover?.path, forKey: "helpButtonHoverImage")
         defaults.set(theme.helpDown?.path, forKey: "helpButtonPressedImage")
+        defaults.set(theme.helpDisabled?.path, forKey: "helpButtonDisabledImage")
 
         defaults.set(theme.frameDirectory?.path, forKey: "windowFrameDirectory")
 
         defaults.set(theme.id, forKey: "currentThemeId")
 
+        WindowFrameStore.invalidate()
         NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
     }
 
@@ -386,12 +449,13 @@ class ThemeManager: ObservableObject {
         defaults.removeObject(forKey: "windowFrameDirectory")
         defaults.removeObject(forKey: "currentThemeId")
 
+        WindowFrameStore.invalidate()
         NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
     }
 
     private func loadCurrentTheme() {
         guard let themeId = UserDefaults.standard.string(forKey: "currentThemeId") else { return }
-        currentTheme = themes.first { $0.id == themeId }
+        currentTheme = themeId == draftDirectory.path ? draftTheme() : themes.first { $0.id == themeId }
         // A frame may have been added to the theme folder since it was applied.
         UserDefaults.standard.set(currentTheme?.frameDirectory?.path, forKey: "windowFrameDirectory")
     }
@@ -409,81 +473,5 @@ class ThemeManager: ObservableObject {
 
     func revealThemesFolder() {
         NSWorkspace.shared.open(themesDirectory)
-    }
-
-    func saveCustomTheme(name: String, author: String?) -> String? {
-        let defaults = UserDefaults.standard
-
-        // Gather all custom image paths
-        var imagePaths: [(key: String, path: String, destName: String)] = []
-
-        let imageKeys: [(key: String, dest: String)] = [
-            ("closeButtonImage", "close_up"),
-            ("closeButtonHoverImage", "close_hover"),
-            ("closeButtonPressedImage", "close_down"),
-            ("closeButtonDisabledImage", "close_disabled"),
-            ("minimizeButtonImage", "min_up"),
-            ("minimizeButtonHoverImage", "min_hover"),
-            ("minimizeButtonPressedImage", "min_down"),
-            ("minimizeButtonDisabledImage", "min_disabled"),
-            ("zoomButtonImage", "max_up"),
-            ("zoomButtonHoverImage", "max_hover"),
-            ("zoomButtonPressedImage", "max_down"),
-            ("zoomButtonDisabledImage", "max_disabled"),
-            ("helpButtonImage", "help_up"),
-            ("helpButtonHoverImage", "help_hover"),
-            ("helpButtonPressedImage", "help_down"),
-            ("helpButtonDisabledImage", "help_disabled")
-        ]
-
-        for (key, destBase) in imageKeys {
-            if let path = defaults.string(forKey: key),
-               fileManager.fileExists(atPath: path) {
-                let ext = URL(fileURLWithPath: path).pathExtension
-                imagePaths.append((key, path, "\(destBase).\(ext)"))
-            }
-        }
-
-        guard !imagePaths.isEmpty else { return nil }
-
-        // Create safe folder name
-        let safeName = name.replacingOccurrences(of: "[^a-zA-Z0-9_\\- ]", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespaces)
-        let folderName = safeName.isEmpty ? "Custom Theme" : safeName
-
-        var destDir = themesDirectory.appendingPathComponent(folderName)
-
-        // Add number suffix if exists
-        var suffix = 1
-        while fileManager.fileExists(atPath: destDir.path) {
-            destDir = themesDirectory.appendingPathComponent("\(folderName) \(suffix)")
-            suffix += 1
-        }
-
-        do {
-            try fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
-
-            // Copy images
-            for (_, sourcePath, destName) in imagePaths {
-                let destURL = destDir.appendingPathComponent(destName)
-                try fileManager.copyItem(atPath: sourcePath, toPath: destURL.path)
-            }
-
-            // Create readme with author info
-            var readme = "Theme: \(name)\n"
-            if let author = author, !author.isEmpty {
-                readme += "Author: \(author)\n"
-            }
-            readme += "\nCreated with Trois\n"
-
-            let readmeURL = destDir.appendingPathComponent("readme.txt")
-            try readme.write(to: readmeURL, atomically: true, encoding: .utf8)
-
-            return destDir.path
-        } catch {
-            print("Failed to save custom theme: \(error)")
-            try? fileManager.removeItem(at: destDir)
-            return nil
-        }
     }
 }
