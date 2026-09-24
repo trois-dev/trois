@@ -5,9 +5,7 @@ import ApplicationServices
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var buttonTracker: WindowButtonTracker?
     private var multiWindowTracker: MultiWindowTracker?
-    private var overlayManager: OverlayManager?
     private var settingsWindow: NSWindow?
     private var permissionCheckTimer: Timer?
     private var appLaunchObserver: NSObjectProtocol?
@@ -157,7 +155,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(newState, forKey: "allWindowsMode")
 
         // Restart tracking with new mode
-        if buttonTracker != nil || multiWindowTracker != nil {
+        if multiWindowTracker != nil {
             stopTracking()
             startTracking()
         }
@@ -166,16 +164,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func startTracking() {
         let allWindowsMode = UserDefaults.standard.bool(forKey: "allWindowsMode")
 
-        if allWindowsMode {
-            // Multi-window mode - track all visible windows
-            multiWindowTracker = MultiWindowTracker()
-            multiWindowTracker?.startTracking()
-        } else {
-            // Single-window mode - track focused window only
-            overlayManager = OverlayManager()
-            buttonTracker = WindowButtonTracker(overlayManager: overlayManager!)
-            buttonTracker?.startTracking()
-        }
+        // All-windows mode tracks every visible window, otherwise only the focused one
+        multiWindowTracker = MultiWindowTracker(allWindows: allWindowsMode)
+        multiWindowTracker?.startTracking()
 
         UserDefaults.standard.set(true, forKey: "troisEnabled")
 
@@ -189,7 +180,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func reloadOverlayImages() {
-        overlayManager?.reloadImages()
         multiWindowTracker?.reloadAllImages()
 
         // Also notify injected apps
@@ -199,11 +189,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopTracking() {
-        buttonTracker?.stopTracking()
-        buttonTracker = nil
-        overlayManager?.removeAllOverlays()
-        overlayManager = nil
-
         multiWindowTracker?.stopTracking()
         multiWindowTracker = nil
 
@@ -278,7 +263,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateMenuState() {
         guard let menu = statusItem.menu else { return }
         if let enabledItem = menu.item(withTitle: "Enabled") {
-            enabledItem.state = (buttonTracker != nil) ? .on : .off
+            enabledItem.state = (multiWindowTracker != nil) ? .on : .off
         }
 
         // Remove accessibility item if permission granted

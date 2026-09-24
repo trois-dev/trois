@@ -1,268 +1,330 @@
-// Tracks button positions for ALL visible windows across all apps
+// Tracks traffic-light buttons of visible windows and keeps overlays pinned to them.
 import Cocoa
 import ApplicationServices
-import QuartzCore
 
+struct ButtonFrames: Equatable {
+    var close: CGRect?
+    var minimize: CGRect?
+    var zoom: CGRect?
+}
+
+// Motion comes from window-server move/resize events, so overlays follow at
+// window-server latency without AX reads. AX is only read when a window is
+// first seen or its size changes. A periodic scan picks up new and closed
+// windows and focus changes.
 class MultiWindowTracker {
+    // False follows only the focused window of the frontmost app.
+    private let allWindows: Bool
     private var overlayManagers: [CGWindowID: OverlayManager] = [:]
-    private var displayLink: CVDisplayLink?
-    private var dragEndTimers: [CGWindowID: Timer] = [:]
+    // Windows with no AX match or no buttons, with when they were last tried.
+    private var rejected: [CGWindowID: CFAbsoluteTime] = [:]
+    private var subscribed: [CGWindowID] = []
     private var draggingWindows: Set<CGWindowID> = []
+    private var settleWork: [CGWindowID: DispatchWorkItem] = [:]
+    private var refreshWork: [CGWindowID: DispatchWorkItem] = [:]
+    private var scanTimer: Timer?
+    private var mouseMonitor: Any?
 
-    // Track which PIDs we've set up observers for
-    private var axObservers: [pid_t: AXObserver] = [:]
+    // Motion is considered over this long after the last move event.
+    private static let settleDelay: TimeInterval = 0.1
+    private static let rejectRetry: CFAbsoluteTime = 1.0
+
+    init(allWindows: Bool) {
+        self.allWindows = allWindows
+    }
 
     func startTracking() {
-        setupDisplayLink()
+        WindowServerEvents.start()
+        WindowServerEvents.handler = { [weak self] event, wid in
+            self?.handle(event: event, wid: wid)
+        }
 
-        // Watch for app launches/terminations
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification,
+                     NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.didActivateApplicationNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
+            center.addObserver(self, selector: #selector(workspaceChanged), name: name, object: nil)
+        }
+        NotificationCenter.default.addObserver(
             self,
-            selector: #selector(appLaunched),
-            name: NSWorkspace.didLaunchApplicationNotification,
+            selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(appTerminated),
-            name: NSWorkspace.didTerminateApplicationNotification,
-            object: nil
-        )
 
-        // Initial scan
-        updateAllWindows()
+        // A click can focus another window of the same app, which posts no
+        // workspace notification. The app focuses it after the click, so check
+        // a few times shortly after instead of waiting for the next scan.
+        if !allWindows {
+            mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+                for delay in [0.03, 0.1, 0.25] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.scan() }
+                }
+            }
+        }
+
+        // Without window-server events the scan is also what moves overlays.
+        let interval: TimeInterval = WindowServerEvents.isAvailable ? 0.1 : 1.0 / 60.0
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.scan()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        scanTimer = timer
+
+        scan()
     }
 
     func stopTracking() {
-        if let link = displayLink {
-            CVDisplayLinkStop(link)
-            displayLink = nil
+        scanTimer?.invalidate()
+        scanTimer = nil
+        if let mouseMonitor {
+            NSEvent.removeMonitor(mouseMonitor)
         }
+        mouseMonitor = nil
+        WindowServerEvents.handler = nil
+        WindowServerEvents.subscribe([])
+        subscribed = []
 
-        // Clean up all observers
-        for (_, observer) in axObservers {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        for wid in Array(overlayManagers.keys) {
+            removeWindow(wid)
         }
-        axObservers.removeAll()
-
-        // Remove all overlays
-        for (_, manager) in overlayManagers {
-            manager.removeAllOverlays()
-        }
-        overlayManagers.removeAll()
+        rejected.removeAll()
 
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
     }
 
-    private func setupDisplayLink() {
-        var link: CVDisplayLink?
-        CVDisplayLinkCreateWithActiveCGDisplays(&link)
-        guard let displayLink = link else { return }
+    @objc private func workspaceChanged(_ notification: Notification) {
+        scan()
+    }
 
-        let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo -> CVReturn in
-            guard let userInfo = userInfo else { return kCVReturnSuccess }
-            let tracker = Unmanaged<MultiWindowTracker>.fromOpaque(userInfo).takeUnretainedValue()
-            DispatchQueue.main.async {
-                tracker.updateAllWindows()
+    @objc private func screensChanged(_ notification: Notification) {
+        // The primary screen height used for AppKit coordinates may have changed.
+        for manager in overlayManagers.values {
+            manager.refresh()
+        }
+        scan()
+    }
+
+    // MARK: - Window-server events
+
+    private func handle(event: UInt32, wid: CGWindowID) {
+        guard let manager = overlayManagers[wid] else { return }
+        switch event {
+        case WindowServerEvents.moved:
+            windowMoved(wid, manager: manager)
+        case WindowServerEvents.resized:
+            if !draggingWindows.contains(wid), let frame = WindowServer.bounds(of: wid) {
+                manager.follow(targetFrame: frame)
             }
-            return kCVReturnSuccess
+            scheduleRefresh(wid)
+        case WindowServerEvents.destroyed:
+            removeWindow(wid)
+            updateSubscription()
+        default:
+            break
         }
-
-        let userInfo = Unmanaged.passUnretained(self).toOpaque()
-        CVDisplayLinkSetOutputCallback(displayLink, callback, userInfo)
-        CVDisplayLinkStart(displayLink)
-        self.displayLink = displayLink
     }
 
-    @objc private func appLaunched(_ notification: Notification) {
-        // New app launched - will be picked up on next update cycle
-        updateAllWindows()
-    }
-
-    @objc private func appTerminated(_ notification: Notification) {
-        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-        let pid = app.processIdentifier
-
-        // Remove observer for this app
-        if let observer = axObservers[pid] {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
-            axObservers.removeValue(forKey: pid)
+    private func windowMoved(_ wid: CGWindowID, manager: OverlayManager) {
+        if UserDefaults.standard.bool(forKey: "hideButtonsOnDrag") {
+            if draggingWindows.insert(wid).inserted {
+                manager.hideOverlays()
+            }
+        } else if let frame = WindowServer.bounds(of: wid) {
+            manager.follow(targetFrame: frame)
         }
-
-        // Clean up will happen in updateAllWindows when windows are no longer visible
-        updateAllWindows()
+        scheduleSettle(wid)
     }
 
-    private func updateAllWindows() {
-        // Get all on-screen windows
-        let windowListOptions: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let windowInfoList = CGWindowListCopyWindowInfo(windowListOptions, kCGNullWindowID) as? [[String: Any]] else {
+    private func scheduleSettle(_ wid: CGWindowID) {
+        settleWork[wid]?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.settle(wid)
+        }
+        settleWork[wid] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay, execute: work)
+    }
+
+    private func settle(_ wid: CGWindowID) {
+        settleWork[wid] = nil
+        guard let manager = overlayManagers[wid] else { return }
+        if draggingWindows.remove(wid) != nil {
+            if let frame = WindowServer.bounds(of: wid) {
+                manager.follow(targetFrame: frame)
+            }
+            manager.showOverlays()
+        }
+        manager.syncAppKitFrames()
+    }
+
+    // Live resizes fire resized every frame; read AX once they pause.
+    private func scheduleRefresh(_ wid: CGWindowID) {
+        refreshWork[wid]?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.refreshWork[wid] = nil
+            guard !self.draggingWindows.contains(wid) else { return }
+            self.overlayManagers[wid]?.refresh()
+        }
+        refreshWork[wid] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay, execute: work)
+    }
+
+    // MARK: - Scan
+
+    private func scan() {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let infoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return
         }
 
-        var visibleWindowIDs: Set<CGWindowID> = []
         let myPID = ProcessInfo.processInfo.processIdentifier
         let myBundleID = Bundle.main.bundleIdentifier
+        let focusedWID = allWindows ? nil : focusedWindowID()
 
-        for windowInfo in windowInfoList {
-            guard let windowID = windowInfo[kCGWindowNumber as String] as? CGWindowID,
-                  let ownerPID = windowInfo[kCGWindowOwnerPID as String] as? pid_t,
-                  let layer = windowInfo[kCGWindowLayer as String] as? Int else {
+        var candidates: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
+
+        for info in infoList {
+            guard let wid = info[kCGWindowNumber as String] as? CGWindowID,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let layer = info[kCGWindowLayer as String] as? Int else {
+                continue
+            }
+            // Skip our own windows and system UI (layer != 0)
+            if pid == myPID || layer != 0 { continue }
+            if !allWindows && wid != focusedWID { continue }
+
+            // Skip windows without real bounds
+            guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: boundsDict),
+                  frame.width > 50 && frame.height > 50 else {
                 continue
             }
 
-            // Skip our own windows
-            if ownerPID == myPID { continue }
-
-            // Skip if it's a menu bar, dock, or other system UI (layer != 0)
-            if layer != 0 { continue }
-
-            // Skip windows without bounds (not real windows)
-            guard let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: CGFloat],
-                  let width = boundsDict["Width"], let height = boundsDict["Height"],
-                  width > 50 && height > 50 else {
-                continue
-            }
-
-            // Get the app for this PID
-            guard let app = NSRunningApplication(processIdentifier: ownerPID),
+            guard let app = NSRunningApplication(processIdentifier: pid),
                   app.activationPolicy == .regular,
                   app.bundleIdentifier != myBundleID else {
                 continue
             }
 
-            visibleWindowIDs.insert(windowID)
+            candidates.append((wid, pid, frame))
+        }
 
-            // Get or create overlay manager for this window
-            if overlayManagers[windowID] == nil {
-                overlayManagers[windowID] = OverlayManager()
+        let now = CFAbsoluteTimeGetCurrent()
+        var axWindowsByPID: [pid_t: [AXUIElement]] = [:]
+        var seen: Set<CGWindowID> = []
+
+        for candidate in candidates {
+            let wid = candidate.wid
+            seen.insert(wid)
+
+            if let manager = overlayManagers[wid] {
+                // Windows in motion are driven by their events.
+                if settleWork[wid] != nil || refreshWork[wid] != nil { continue }
+                if manager.targetFrame.size != candidate.frame.size {
+                    manager.refresh()
+                } else if manager.targetFrame.origin != candidate.frame.origin {
+                    // Only reached when move events were missed or are unavailable.
+                    manager.follow(targetFrame: candidate.frame)
+                    scheduleSettle(wid)
+                }
+                continue
             }
 
-            // Update overlays for this window
-            updateWindow(windowID: windowID, pid: ownerPID)
+            if let tried = rejected[wid], now - tried < Self.rejectRetry { continue }
+
+            if axWindowsByPID[candidate.pid] == nil {
+                axWindowsByPID[candidate.pid] = axWindows(of: candidate.pid)
+            }
+            let manager = OverlayManager(targetWID: wid)
+            guard let axWindow = matchAXWindow(wid: wid, frame: candidate.frame, in: axWindowsByPID[candidate.pid] ?? []),
+                  manager.refresh(window: axWindow) else {
+                manager.removeAllOverlays()
+                rejected[wid] = now
+                continue
+            }
+            rejected[wid] = nil
+            overlayManagers[wid] = manager
         }
 
-        // Remove overlays for windows that are no longer visible
-        let removedIDs = Set(overlayManagers.keys).subtracting(visibleWindowIDs)
-        for windowID in removedIDs {
-            overlayManagers[windowID]?.removeAllOverlays()
-            overlayManagers.removeValue(forKey: windowID)
-            dragEndTimers[windowID]?.invalidate()
-            dragEndTimers.removeValue(forKey: windowID)
-            draggingWindows.remove(windowID)
+        for wid in Set(overlayManagers.keys).subtracting(seen) {
+            removeWindow(wid)
         }
+        rejected = rejected.filter { seen.contains($0.key) }
+        updateSubscription()
     }
 
-    private func updateWindow(windowID: CGWindowID, pid: pid_t) {
-        guard let manager = overlayManagers[windowID] else { return }
+    private func removeWindow(_ wid: CGWindowID) {
+        overlayManagers[wid]?.removeAllOverlays()
+        overlayManagers[wid] = nil
+        settleWork[wid]?.cancel()
+        settleWork[wid] = nil
+        refreshWork[wid]?.cancel()
+        refreshWork[wid] = nil
+        draggingWindows.remove(wid)
+    }
 
-        // Skip if dragging and hide-on-drag is enabled
-        if draggingWindows.contains(windowID) {
-            return
-        }
+    private func updateSubscription() {
+        let wids = overlayManagers.keys.sorted()
+        guard wids != subscribed else { return }
+        subscribed = wids
+        WindowServerEvents.subscribe(wids)
+    }
 
+    // MARK: - AX lookup
+
+    private func focusedWindowID() -> CGWindowID? {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+              frontApp.bundleIdentifier != Bundle.main.bundleIdentifier else { return nil }
+        let appRef = AXUIElementCreateApplication(frontApp.processIdentifier)
+        var windowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
+              let windowRef else { return nil }
+        var wid: CGWindowID = 0
+        guard _AXUIElementGetWindow(windowRef as! AXUIElement, &wid) == .success, wid != 0 else { return nil }
+        return wid
+    }
+
+    private func axWindows(of pid: pid_t) -> [AXUIElement] {
         let appRef = AXUIElementCreateApplication(pid)
-
         var windowsRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windows = windowsRef as? [AXUIElement] else {
-            manager.hideOverlays()
-            return
-        }
+              let windows = windowsRef as? [AXUIElement] else { return [] }
+        return windows
+    }
 
-        // Find the AXUIElement that corresponds to this CGWindowID
-        // We need to match by position/size since there's no direct mapping
-        guard let windowInfo = getWindowInfo(windowID: windowID),
-              let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: CGFloat],
-              let targetX = boundsDict["X"],
-              let targetY = boundsDict["Y"],
-              let targetW = boundsDict["Width"],
-              let targetH = boundsDict["Height"] else {
-            manager.hideOverlays()
-            return
+    // Matches by window id, falling back to frame for windows that don't expose one.
+    private func matchAXWindow(wid: CGWindowID, frame: CGRect, in windows: [AXUIElement]) -> AXUIElement? {
+        for window in windows {
+            var windowID: CGWindowID = 0
+            if _AXUIElementGetWindow(window, &windowID) == .success, windowID == wid {
+                return window
+            }
         }
-
-        // Find matching AX window by position
-        var matchedWindow: AXUIElement?
         for window in windows {
             var posRef: CFTypeRef?
             var sizeRef: CFTypeRef?
-
             guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posRef) == .success,
                   AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef) == .success else {
                 continue
             }
-
             var pos = CGPoint.zero
             var size = CGSize.zero
             AXValueGetValue(posRef as! AXValue, .cgPoint, &pos)
             AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
 
             // Match with some tolerance for frame differences
-            if abs(pos.x - targetX) < 5 && abs(pos.y - targetY) < 5 &&
-               abs(size.width - targetW) < 5 && abs(size.height - targetH) < 5 {
-                matchedWindow = window
-                break
+            if abs(pos.x - frame.minX) < 5 && abs(pos.y - frame.minY) < 5 &&
+               abs(size.width - frame.width) < 5 && abs(size.height - frame.height) < 5 {
+                return window
             }
-        }
-
-        guard let window = matchedWindow else {
-            manager.hideOverlays()
-            return
-        }
-
-        guard let frames = getButtonFrames(for: window) else {
-            manager.hideOverlays()
-            return
-        }
-
-        manager.updateOverlays(for: window, frames: frames)
-    }
-
-    private func getWindowInfo(windowID: CGWindowID) -> [String: Any]? {
-        guard let windowInfoList = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
-              let windowInfo = windowInfoList.first else {
-            return nil
-        }
-        return windowInfo
-    }
-
-    private func getButtonFrames(for window: AXUIElement) -> ButtonFrames? {
-        var frames = ButtonFrames()
-
-        frames.close = getButtonFrame(for: window, attribute: kAXCloseButtonAttribute as CFString)
-        frames.minimize = getButtonFrame(for: window, attribute: kAXMinimizeButtonAttribute as CFString)
-        frames.zoom = getButtonFrame(for: window, attribute: kAXZoomButtonAttribute as CFString)
-
-        if frames.close != nil || frames.minimize != nil || frames.zoom != nil {
-            return frames
         }
         return nil
     }
 
-    private func getButtonFrame(for window: AXUIElement, attribute: CFString) -> CGRect? {
-        var buttonRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, attribute, &buttonRef) == .success,
-              let button = buttonRef else { return nil }
-
-        let axButton = button as! AXUIElement
-
-        var positionRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-
-        guard AXUIElementCopyAttributeValue(axButton, kAXPositionAttribute as CFString, &positionRef) == .success,
-              AXUIElementCopyAttributeValue(axButton, kAXSizeAttribute as CFString, &sizeRef) == .success else {
-            return nil
-        }
-
-        var position = CGPoint.zero
-        var size = CGSize.zero
-
-        AXValueGetValue(positionRef as! AXValue, .cgPoint, &position)
-        AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
-
-        return CGRect(origin: position, size: size)
-    }
+    // MARK: - Appearance
 
     func hideAllOverlays() {
         for (_, manager) in overlayManagers {

@@ -7,8 +7,103 @@ class OverlayManager {
     private var minimizeOverlay: OverlayWindow?
     private var zoomOverlay: OverlayWindow?
     private var currentWindow: AXUIElement?
+    let targetWID: CGWindowID
+    // Target frame in global top-left coordinates, as of the last placement.
+    private(set) var targetFrame: CGRect = .zero
+    // Button frames relative to the target's top-left corner. Buttons stay put
+    // relative to that corner while the window moves, so a move needs no AX reads.
+    private var offsets = ButtonFrames()
 
-    func updateOverlays(for window: AXUIElement, frames: ButtonFrames) {
+    init(targetWID: CGWindowID) {
+        self.targetWID = targetWID
+    }
+
+    /// Re-reads button frames through AX. Slow; for new windows, resizes, and layout changes.
+    /// Returns false and hides the overlays when the window has no buttons.
+    @discardableResult
+    func refresh(window: AXUIElement) -> Bool {
+        guard let frame = axFrame(of: window) else {
+            hideOverlays()
+            return false
+        }
+        targetFrame = frame
+        guard let frames = buttonFrames(for: window) else {
+            hideOverlays()
+            return false
+        }
+        offsets = ButtonFrames(
+            close: frames.close?.offsetBy(dx: -frame.minX, dy: -frame.minY),
+            minimize: frames.minimize?.offsetBy(dx: -frame.minX, dy: -frame.minY),
+            zoom: frames.zoom?.offsetBy(dx: -frame.minX, dy: -frame.minY)
+        )
+        updateOverlays(for: window, frames: frames)
+        return true
+    }
+
+    /// Re-reads buttons from the window refresh(window:) last used.
+    @discardableResult
+    func refresh() -> Bool {
+        guard let window = currentWindow else { return false }
+        return refresh(window: window)
+    }
+
+    /// Moves the overlays with the target using cached offsets, in one
+    /// window-server transaction.
+    func follow(targetFrame frame: CGRect) {
+        targetFrame.origin = frame.origin
+        var moves: [(overlay: OverlayWindow, center: CGPoint)] = []
+        for (overlay, offset) in overlaysWithOffsets() where overlay.isVisible {
+            moves.append((overlay, CGPoint(x: frame.minX + offset.midX, y: frame.minY + offset.midY)))
+        }
+        guard !moves.isEmpty else { return }
+        let serverMoves = moves.map { (wid: CGWindowID($0.overlay.windowNumber), origin: $0.overlay.origin(centeredOn: $0.center)) }
+        if WindowServer.move(serverMoves) {
+            for m in moves { m.overlay.didMoveOnServer(center: m.center) }
+        } else {
+            for m in moves { m.overlay.move(center: m.center) }
+        }
+    }
+
+    /// Brings AppKit's cached frames in line after window-server moves.
+    func syncAppKitFrames() {
+        closeOverlay?.syncAppKitFrame()
+        minimizeOverlay?.syncAppKitFrame()
+        zoomOverlay?.syncAppKitFrame()
+    }
+
+    private func overlaysWithOffsets() -> [(OverlayWindow, CGRect)] {
+        var result: [(OverlayWindow, CGRect)] = []
+        if let o = closeOverlay, let f = offsets.close { result.append((o, f)) }
+        if let o = minimizeOverlay, let f = offsets.minimize { result.append((o, f)) }
+        if let o = zoomOverlay, let f = offsets.zoom { result.append((o, f)) }
+        return result
+    }
+
+    private func axFrame(of element: AXUIElement) -> CGRect? {
+        var positionRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let positionRef, let sizeRef else { return nil }
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        AXValueGetValue(positionRef as! AXValue, .cgPoint, &position)
+        AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
+        return CGRect(origin: position, size: size)
+    }
+
+    private func buttonFrames(for window: AXUIElement) -> ButtonFrames? {
+        var frames = ButtonFrames()
+        frames.close = getButton(for: window, attribute: kAXCloseButtonAttribute as CFString).flatMap(axFrame)
+        frames.minimize = getButton(for: window, attribute: kAXMinimizeButtonAttribute as CFString).flatMap(axFrame)
+        frames.zoom = getButton(for: window, attribute: kAXZoomButtonAttribute as CFString).flatMap(axFrame)
+        if frames.close != nil || frames.minimize != nil || frames.zoom != nil {
+            return frames
+        }
+        return nil
+    }
+
+    private func updateOverlays(for window: AXUIElement, frames: ButtonFrames) {
         currentWindow = window
         let zoomed = isWindowZoomed(window)
 
@@ -138,6 +233,9 @@ class OverlayWindow: NSWindow {
     private var imageSize: NSSize = NSSize(width: 14, height: 14)
     private var buttonCenter: CGPoint = .zero
     private var windowIsZoomed = false
+    // Set after a window-server move AppKit didn't see. AppKit's cached frame
+    // keeps the old origin until syncAppKitFrame().
+    private var appKitStale = false
 
     init(buttonType: TrafficLightType) {
         self.buttonType = buttonType
@@ -149,6 +247,8 @@ class OverlayWindow: NSWindow {
         )
 
         self.level = .floating
+        // Owned by OverlayManager. close() must not also release it.
+        self.isReleasedWhenClosed = false
         self.backgroundColor = .clear
         self.isOpaque = false
         self.hasShadow = false
@@ -279,6 +379,7 @@ class OverlayWindow: NSWindow {
 
     private func repositionOnCenter() {
         guard buttonCenter != .zero else { return }
+        appKitStale = false
 
         let cocoaPoint = convertAXToCocoaCoordinates(buttonCenter)
         let x = cocoaPoint.x - imageSize.width / 2
@@ -333,8 +434,33 @@ class OverlayWindow: NSWindow {
         let y = cocoaPoint.y - imageSize.height / 2
 
         let cocoaFrame = NSRect(x: x, y: y, width: imageSize.width, height: imageSize.height)
+        appKitStale = false
         setFrame(cocoaFrame, display: true)
         orderFront(nil)
+    }
+
+    /// Window-server origin (global top-left) that centers this overlay on `center`.
+    func origin(centeredOn center: CGPoint) -> CGPoint {
+        CGPoint(x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2)
+    }
+
+    /// Records a move the window server already applied.
+    func didMoveOnServer(center: CGPoint) {
+        buttonCenter = center
+        appKitStale = true
+    }
+
+    /// AppKit fallback when SkyLight transactions are unavailable.
+    func move(center: CGPoint) {
+        buttonCenter = center
+        repositionOnCenter()
+    }
+
+    /// Tells AppKit where the window server already has the overlay. Deferred
+    /// until motion stops so the AppKit round-trip stays off the hot path.
+    func syncAppKitFrame() {
+        guard appKitStale else { return }
+        repositionOnCenter()
     }
 
     override func mouseDown(with event: NSEvent) {

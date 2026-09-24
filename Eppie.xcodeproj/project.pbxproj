@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		A1000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000012; };
-		A1000003 /* WindowButtonTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000013; };
 		A1000004 /* OverlayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000014; };
 		A1000005 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000015; };
 		A1000006 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000018; };
@@ -17,12 +16,12 @@
 		A100001D /* SIPDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100001E; };
 		A100001F /* Injector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000021; };
 		A1000022 /* MultiWindowTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000023; };
+		A1000024 /* SkyLight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000025; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A1000010 /* Trois.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Trois.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1000012 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		A1000013 /* WindowButtonTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowButtonTracker.swift; sourceTree = "<group>"; };
 		A1000014 /* OverlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayManager.swift; sourceTree = "<group>"; };
 		A1000015 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -33,6 +32,7 @@
 		A100001E /* SIPDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SIPDetector.swift; sourceTree = "<group>"; };
 		A1000021 /* Injector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Injector.swift; sourceTree = "<group>"; };
 		A1000023 /* MultiWindowTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiWindowTracker.swift; sourceTree = "<group>"; };
+		A1000025 /* SkyLight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyLight.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,13 +67,13 @@
 			children = (
 				A100001C /* main.swift */,
 				A1000012 /* AppDelegate.swift */,
-				A1000013 /* WindowButtonTracker.swift */,
 				A1000014 /* OverlayManager.swift */,
 				A1000015 /* SettingsView.swift */,
 				A1000018 /* ThemeManager.swift */,
 				A100001E /* SIPDetector.swift */,
 				A1000021 /* Injector.swift */,
 				A1000023 /* MultiWindowTracker.swift */,
+				A1000025 /* SkyLight.swift */,
 				A1000019 /* Themes */,
 				A1000016 /* Info.plist */,
 				A1000017 /* Trois.entitlements */,
@@ -151,13 +151,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000002 /* AppDelegate.swift in Sources */,
-				A1000003 /* WindowButtonTracker.swift in Sources */,
 				A1000004 /* OverlayManager.swift in Sources */,
 				A1000005 /* SettingsView.swift in Sources */,
 				A1000006 /* ThemeManager.swift in Sources */,
 				A100001D /* SIPDetector.swift in Sources */,
 				A100001F /* Injector.swift in Sources */,
 				A1000022 /* MultiWindowTracker.swift in Sources */,
+				A1000024 /* SkyLight.swift in Sources */,
 				A100001B /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
