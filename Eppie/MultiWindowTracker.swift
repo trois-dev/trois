@@ -27,6 +27,11 @@ class MultiWindowTracker {
     private var refreshWork: [CGWindowID: DispatchWorkItem] = [:]
     private var scanTimer: Timer?
     private var scanQueued = false
+    // CGWindowListCopyWindowInfo can block for hundreds of ms while the window
+    // server is busy, so it's read here and applied on main.
+    private let windowListQueue = DispatchQueue(label: "Trois.windowlist", qos: .userInteractive)
+    private var scanInFlight = false
+    private var scanAgain = false
     // Normal-level windows of other apps, front to back, and their frames in
     // global top-left coordinates. Used to clip overlays that are covered.
     private var stack: [CGWindowID] = []
@@ -38,7 +43,7 @@ class MultiWindowTracker {
     // Focused window of the frontmost app, when not following all windows.
     private var focusedWID: CGWindowID?
     private var focusQueryInFlight = false
-    // Bumped by stopTracking() so AX results from before it are dropped.
+    // Bumped by stopTracking() so AX results and window lists from before it are dropped.
     private var generation = 0
 
     // Motion is considered over this long after the last move event.
@@ -103,6 +108,8 @@ class MultiWindowTracker {
         stack = []
         frames = [:]
         generation += 1
+        scanInFlight = false
+        scanAgain = false
         lookingUp = []
         seenWindows = []
         focusedWID = nil
@@ -239,15 +246,35 @@ class MultiWindowTracker {
 
     // MARK: - Scan
 
+    // Requests made while a read is in flight are merged into one more read.
     private func scan() {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let infoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+        guard !scanInFlight else {
+            scanAgain = true
             return
         }
+        scanInFlight = true
+        queryFocus()
+        let generation = self.generation
+        windowListQueue.async { [weak self] in
+            let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+            let infoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
+            DispatchQueue.main.async {
+                guard let self, generation == self.generation else { return }
+                self.scanInFlight = false
+                if let infoList {
+                    self.apply(windowList: infoList)
+                }
+                if self.scanAgain {
+                    self.scanAgain = false
+                    self.scan()
+                }
+            }
+        }
+    }
 
+    private func apply(windowList infoList: [[String: Any]]) {
         let myPID = ProcessInfo.processInfo.processIdentifier
         let myBundleID = Bundle.main.bundleIdentifier
-        queryFocus()
 
         var candidates: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
         var newStack: [CGWindowID] = []
