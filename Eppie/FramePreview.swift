@@ -111,7 +111,6 @@ struct FramePreviewView<Buttons: View>: View {
         .frame(width: FramePreviewRenderer.canvas.width, height: FramePreviewRenderer.canvas.height)
         .clipped()
         .task(id: key) {
-            let key = self.key
             let preview = await FramePreviewRenderer.render(key: key, directory: directory, title: title, frameButtons: frameButtons)
             rendered = (key, preview)
         }

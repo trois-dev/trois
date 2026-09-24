@@ -12,7 +12,6 @@ final class SettingsNavigation: ObservableObject {
 }
 
 struct SettingsView: View {
-    @StateObject private var themeManager = ThemeManager.shared
     @ObservedObject private var navigation = SettingsNavigation.shared
 
     var body: some View {
@@ -951,65 +950,6 @@ struct ButtonStateSlot: View {
         imagePath = UserDefaults.standard.string(forKey: userDefaultsKey) ?? ""
         isGenerated = ThemeManager.shared.isDraftImageGenerated(forKey: userDefaultsKey)
     }
-
-}
-
-struct ImagePickerRow: View {
-    let label: String
-    @Binding var path: String
-    let key: String
-
-    var body: some View {
-        HStack {
-            Text(label)
-            Spacer()
-
-            if !path.isEmpty {
-                if let image = NSImage(contentsOfFile: path) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .frame(width: 14, height: 14)
-                }
-                Text(URL(fileURLWithPath: path).lastPathComponent)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 100)
-            }
-
-            Button("Browse...") {
-                selectImage()
-            }
-
-            if !path.isEmpty {
-                Button(action: clearImage) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    private func selectImage() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .bmp, .jpeg, .tiff]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "Select an image for the \(label.lowercased())"
-
-        if panel.runModal() == .OK, let url = panel.url {
-            path = url.path
-            UserDefaults.standard.set(path, forKey: key)
-            NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
-        }
-    }
-
-    private func clearImage() {
-        path = ""
-        UserDefaults.standard.removeObject(forKey: key)
-        NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
-    }
 }
 
 struct AboutView: View {
@@ -1029,16 +969,11 @@ struct AboutView: View {
 
             Text("Classic window themes for a modern Mac.")
 
-            Divider()
-                .frame(width: 200)
-
-            VStack(alignment: .leading, spacing: 6) {
-                feature("Themed buttons", "for close, minimize and zoom")
-                feature("Window frames", "drawn from each theme's chrome")
-                feature("Gallery", "to browse and install themes")
-                feature("Editor", "to build your own or mix parts from others")
-            }
-            .font(.callout)
+            Text("Trois swaps your window buttons and frames for themes from EppieDesktop, Kaleidoscope and more.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
 
             Spacer()
 

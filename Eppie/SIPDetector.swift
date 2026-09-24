@@ -1,16 +1,11 @@
 // Detects SIP status and manages injection mode
 import Foundation
 
-enum InjectionMode {
-    case overlay      // SIP enabled - use overlay windows
-    case injection    // SIP disabled - inject into apps
-}
-
 class SIPDetector {
     static let shared = SIPDetector()
 
+    // True when injection can work; overlays are used otherwise.
     private(set) var sipDisabled: Bool = false
-    private(set) var mode: InjectionMode = .overlay
 
     private init() {
         checkSIPStatus()
@@ -37,8 +32,7 @@ class SIPDetector {
             sipDisabled = false
         }
 
-        mode = sipDisabled ? .injection : .overlay
-        print("Trois: SIP \(sipDisabled ? "disabled" : "enabled"), using \(mode) mode")
+        print("Trois: SIP \(sipDisabled ? "allows injection" : "enabled"), using \(sipDisabled ? "injection" : "overlay") mode")
     }
 
     // Injection needs task_for_pid, which only Debugging Restrictions block. A custom

@@ -25,15 +25,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Run as menu bar app (no dock icon)
         NSApp.setActivationPolicy(.accessory)
 
-        // Check SIP status
-        let sipDetector = SIPDetector.shared
-        print("Trois: Running in \(sipDetector.mode) mode")
-
         setupMenuBar()
         ThemeManager.shared.migrateBundledTheme()
 
         // Set up mode based on SIP status
-        if sipDetector.sipDisabled {
+        if SIPDetector.shared.sipDisabled {
             // Injection mode - no overlays needed
             setupAutoInject()
             offerLoginItemOnce()
@@ -187,7 +183,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let modeItem = NSMenuItem(title: "Mode: \(SIPDetector.shared.sipDisabled ? "Injection" : "Overlay")", action: nil, keyEquivalent: "")
         modeItem.isEnabled = false
         menu.addItem(modeItem)
-
 
         menu.addItem(NSMenuItem.separator())
 

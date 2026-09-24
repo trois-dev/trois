@@ -1,6 +1,5 @@
 // Manages button themes - loading, installing and applying them.
 import Cocoa
-import UniformTypeIdentifiers
 
 struct Theme: Identifiable, Hashable {
     let id: String
@@ -106,7 +105,8 @@ class ThemeManager: ObservableObject {
     let fileManager = FileManager.default
     private let installQueue = DispatchQueue(label: "Trois.themeinstall", qos: .userInitiated)
 
-    // Author mapping from VirtualPlastic.net gallery
+    // Authors from the VirtualPlastic.net gallery, for its themes dropped in by
+    // hand without a theme.json. Catalog themes carry their own.
     private let knownAuthors: [String: String] = [
         "hifiki": "kepplah",
         "spyder": "Spyder",
@@ -211,10 +211,10 @@ class ThemeManager: ObservableObject {
 
     private func loadThemeContents(from directory: URL) -> Theme? {
         let name = directory.lastPathComponent
-        var theme = Theme(id: directory.path, name: name, path: directory)
+        let manifest = readManifest(in: directory)
+        var theme = Theme(id: directory.path, name: manifest?.name ?? name, path: directory)
 
-        if let manifest = readManifest(in: directory) {
-            theme = Theme(id: directory.path, name: manifest.name ?? name, path: directory)
+        if let manifest {
             theme.author = manifest.author
             theme.version = manifest.version
             theme.engine = manifest.engine
@@ -297,7 +297,7 @@ class ThemeManager: ObservableObject {
         let normalizedFilename = filename.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
 
         for pattern in patterns {
-            if normalizedFilename.contains(pattern) || normalizedFilename == pattern {
+            if normalizedFilename.contains(pattern) {
                 return true
             }
         }
