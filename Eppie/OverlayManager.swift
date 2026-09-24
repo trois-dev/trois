@@ -475,9 +475,17 @@ enum ButtonArt {
 
         var title: String {
             switch self {
-            case .bleed: return "Actual size, fill edges"
-            case .original: return "Actual size"
-            case .stretch: return "Stretch to fit"
+            case .bleed: return "Fill gaps"
+            case .original: return "Unchanged"
+            case .stretch: return "Scale up"
+            }
+        }
+
+        var help: String {
+            switch self {
+            case .bleed: return "Actual size, edges extended to cover the button"
+            case .original: return "Not trimmed or scaled. The button can show around small art"
+            case .stretch: return "Trimmed and scaled until it covers the button"
             }
         }
     }

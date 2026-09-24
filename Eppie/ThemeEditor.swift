@@ -301,10 +301,7 @@ struct ThemeEditorView: View {
                 themeManager.resetDraft()
             }
             if frame != nil {
-                Toggle("Window borders", isOn: $windowBorders)
-                Toggle("Buttons in frame", isOn: $frameButtons)
-                    .disabled(!windowBorders)
-                    .help("Put the close, zoom and minimize buttons in the frame instead of at the traffic lights")
+                FrameOptionToggles()
             }
             Spacer()
             if !checks.isEmpty {
@@ -327,17 +324,11 @@ struct ThemeEditorView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
-        .onChange(of: windowBorders) { _ in postReload() }
-        .onChange(of: frameButtons) { _ in postReload() }
     }
 
     private var hasCustomImages: Bool {
         _ = revision
         return EditorButton.allCases.contains { UserDefaults.standard.string(forKey: $0.key("")) != nil }
-    }
-
-    private func postReload() {
-        NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
     }
 
     private func save() {

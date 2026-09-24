@@ -513,6 +513,24 @@ private func reloadOverlays() {
     NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
 }
 
+/// The frame toggles, shared by the Themes tab and the editor.
+struct FrameOptionToggles: View {
+    @AppStorage("windowBorders") private var windowBorders = true
+    @AppStorage("frameButtons") private var frameButtons = false
+
+    var body: some View {
+        Group {
+            Toggle("Show frame", isOn: $windowBorders)
+                .help("Draw the theme's frame around windows")
+            Toggle("Frame buttons", isOn: $frameButtons)
+                .disabled(!windowBorders)
+                .help("Show the frame's own close, minimize and zoom buttons")
+        }
+        .onChange(of: windowBorders) { _ in reloadOverlays() }
+        .onChange(of: frameButtons) { _ in reloadOverlays() }
+    }
+}
+
 struct ThemePickerView: View {
     @ObservedObject var themeManager = ThemeManager.shared
     @AppStorage("windowBorders") private var windowBorders = true
@@ -571,32 +589,19 @@ struct ThemePickerView: View {
                 .padding()
             }
 
-            // Kaleidoscope themes carry a window frame.
-            if themeManager.currentTheme?.frameDirectory != nil {
-                Divider()
-                HStack {
-                    Toggle("Window borders", isOn: $windowBorders)
-                    Toggle("Buttons in frame", isOn: $frameButtons)
-                        .disabled(!windowBorders)
-                        .help("Put the close, zoom and minimize buttons in the frame instead of at the traffic lights")
-                    Spacer()
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .onChange(of: windowBorders) { _ in reloadOverlays() }
-                .onChange(of: frameButtons) { _ in reloadOverlays() }
-            }
-
+            // Always shown, since they change every card, not just the applied theme.
             Divider()
-            HStack {
-                Picker("Small buttons", selection: $buttonSizing) {
+            HStack(spacing: 16) {
+                Picker("Button art:", selection: $buttonSizing) {
                     ForEach(ButtonArt.Sizing.allCases, id: \.rawValue) { mode in
                         Text(mode.title).tag(mode.rawValue)
                     }
                 }
+                .pickerStyle(.segmented)
                 .fixedSize()
-                .help("How art smaller than the system buttons covers them")
+                .help(ButtonArt.Sizing.allCases.map { "\($0.title): \($0.help)" }.joined(separator: "\n"))
                 Spacer()
+                FrameOptionToggles()
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
