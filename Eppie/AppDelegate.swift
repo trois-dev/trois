@@ -235,7 +235,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            print("Trois: Could not change login item: \(error)")
+            let alert = NSAlert()
+            alert.messageText = enabled ? "Trois Can't Open at Login" : "Trois Still Opens at Login"
+            alert.informativeText = "\(error.localizedDescription) You can change it in System Settings > General > Login Items."
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
         }
     }
 
