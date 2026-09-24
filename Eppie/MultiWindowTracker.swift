@@ -10,8 +10,8 @@ struct ButtonFrames: Equatable {
 
 // Motion comes from window-server move/resize events, so overlays follow at
 // window-server latency without AX reads. AX is only read when a window is
-// first seen or its size changes. A periodic scan picks up new and closed
-// windows and focus changes.
+// first seen or its size changes, on AXQueue so a slow app can't stall motion.
+// A periodic scan picks up new and closed windows and focus changes.
 //
 // Overlays can't be ordered directly above another app's window, so they stay
 // floating and are clipped wherever a window in front of their target covers them.
@@ -32,6 +32,14 @@ class MultiWindowTracker {
     private var stack: [CGWindowID] = []
     private var frames: [CGWindowID: CGRect] = [:]
     private var mouseMonitor: Any?
+    // Windows whose first AX lookup is in flight, and the windows the last scan saw.
+    private var lookingUp: Set<CGWindowID> = []
+    private var seenWindows: Set<CGWindowID> = []
+    // Focused window of the frontmost app, when not following all windows.
+    private var focusedWID: CGWindowID?
+    private var focusQueryInFlight = false
+    // Bumped by stopTracking() so AX results from before it are dropped.
+    private var generation = 0
 
     // Motion is considered over this long after the last move event.
     private static let settleDelay: TimeInterval = 0.1
@@ -94,6 +102,11 @@ class MultiWindowTracker {
         subscribed = []
         stack = []
         frames = [:]
+        generation += 1
+        lookingUp = []
+        seenWindows = []
+        focusedWID = nil
+        focusQueryInFlight = false
 
         for wid in Array(overlayManagers.keys) {
             removeWindow(wid)
@@ -199,18 +212,29 @@ class MultiWindowTracker {
     }
 
     // Live resizes fire resized every frame; read AX once they pause.
-    private func scheduleRefresh(_ wid: CGWindowID) {
+    private func scheduleRefresh(_ wid: CGWindowID, after delay: TimeInterval = settleDelay) {
         refreshWork[wid]?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.refreshWork[wid] = nil
             guard !self.draggingWindows.contains(wid) else { return }
             self.overlayManagers[wid]?.refresh()
-            // A new button image or position needs its clip recomputed.
-            self.updateClipping()
         }
         refreshWork[wid] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func didRefresh(_ wid: CGWindowID, read: WindowRead) {
+        guard let manager = overlayManagers[wid] else { return }
+        if case .timedOut = read {
+            scheduleRefresh(wid, after: Self.rejectRetry)
+        }
+        // A drag may have started while AX was read.
+        if draggingWindows.contains(wid) {
+            manager.hideOverlays()
+        }
+        // A new button image or position needs its clip recomputed.
+        updateClipping()
     }
 
     // MARK: - Scan
@@ -223,7 +247,7 @@ class MultiWindowTracker {
 
         let myPID = ProcessInfo.processInfo.processIdentifier
         let myBundleID = Bundle.main.bundleIdentifier
-        let focusedWID = allWindows ? nil : focusedWindowID()
+        queryFocus()
 
         var candidates: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
         var newStack: [CGWindowID] = []
@@ -276,7 +300,7 @@ class MultiWindowTracker {
         }
 
         let now = CFAbsoluteTimeGetCurrent()
-        var axWindowsByPID: [pid_t: [AXUIElement]] = [:]
+        var lookups: [pid_t: [(wid: CGWindowID, frame: CGRect)]] = [:]
         var seen: Set<CGWindowID> = []
 
         for candidate in candidates {
@@ -285,7 +309,7 @@ class MultiWindowTracker {
 
             if let manager = overlayManagers[wid] {
                 // Windows in motion are driven by their events.
-                if settleWork[wid] != nil || refreshWork[wid] != nil { continue }
+                if settleWork[wid] != nil || refreshWork[wid] != nil || manager.isRefreshing { continue }
                 if manager.targetFrame.size != candidate.frame.size {
                     manager.refresh()
                 } else if manager.targetFrame.origin != candidate.frame.origin {
@@ -297,25 +321,60 @@ class MultiWindowTracker {
             }
 
             if let tried = rejected[wid], now - tried < Self.rejectRetry { continue }
-
-            if axWindowsByPID[candidate.pid] == nil {
-                axWindowsByPID[candidate.pid] = axWindows(of: candidate.pid)
+            if lookingUp.insert(wid).inserted {
+                lookups[candidate.pid, default: []].append((wid, candidate.frame))
             }
-            let manager = OverlayManager(targetWID: wid)
-            guard let axWindow = matchAXWindow(wid: wid, frame: candidate.frame, in: axWindowsByPID[candidate.pid] ?? []),
-                  manager.refresh(window: axWindow) else {
-                manager.removeAllOverlays()
-                rejected[wid] = now
-                continue
-            }
-            rejected[wid] = nil
-            overlayManagers[wid] = manager
         }
 
         for wid in Set(overlayManagers.keys).subtracting(seen) {
             removeWindow(wid)
         }
+        seenWindows = seen
         rejected = rejected.filter { seen.contains($0.key) }
+        updateSubscription()
+        updateClipping()
+
+        for (pid, windows) in lookups {
+            lookUp(windows, of: pid)
+        }
+    }
+
+    // Finds and reads the AX windows for newly seen windows of one app.
+    private func lookUp(_ windows: [(wid: CGWindowID, frame: CGRect)], of pid: pid_t) {
+        let generation = self.generation
+        AXQueue.async { [weak self] in
+            let axWindows = Self.axWindows(of: pid)
+            let reads = windows.map { window -> (wid: CGWindowID, read: WindowRead) in
+                guard let axWindow = Self.matchAXWindow(wid: window.wid, frame: window.frame, in: axWindows) else {
+                    return (window.wid, .unusable(frame: nil))
+                }
+                return (window.wid, OverlayManager.read(axWindow))
+            }
+            DispatchQueue.main.async {
+                self?.didLookUp(reads, generation: generation)
+            }
+        }
+    }
+
+    private func didLookUp(_ reads: [(wid: CGWindowID, read: WindowRead)], generation: Int) {
+        guard generation == self.generation else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        for (wid, read) in reads {
+            lookingUp.remove(wid)
+            // The window may have closed or lost focus while AX was read.
+            guard seenWindows.contains(wid), overlayManagers[wid] == nil else { continue }
+            let manager = OverlayManager(targetWID: wid)
+            guard manager.apply(read) else {
+                manager.removeAllOverlays()
+                rejected[wid] = now
+                continue
+            }
+            manager.didRefresh = { [weak self] read in
+                self?.didRefresh(wid, read: read)
+            }
+            rejected[wid] = nil
+            overlayManagers[wid] = manager
+        }
         updateSubscription()
         updateClipping()
     }
@@ -350,19 +409,43 @@ class MultiWindowTracker {
 
     // MARK: - AX lookup
 
-    private func focusedWindowID() -> CGWindowID? {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication,
-              frontApp.bundleIdentifier != Bundle.main.bundleIdentifier else { return nil }
-        let appRef = AXUIElementCreateApplication(frontApp.processIdentifier)
+    // Scans with the last known focus and scans again if the answer differs.
+    private func queryFocus() {
+        guard !allWindows, !focusQueryInFlight else { return }
+        focusQueryInFlight = true
+        var pid: pid_t?
+        if let frontApp = NSWorkspace.shared.frontmostApplication,
+           frontApp.bundleIdentifier != Bundle.main.bundleIdentifier {
+            pid = frontApp.processIdentifier
+        }
+        let generation = self.generation
+        AXQueue.async { [weak self] in
+            let wid = pid.map(Self.focusedWindowID(of:)) ?? .some(nil)
+            DispatchQueue.main.async {
+                guard let self, generation == self.generation else { return }
+                self.focusQueryInFlight = false
+                // Nil when the app didn't answer; keep the last known focus.
+                if let wid, wid != self.focusedWID {
+                    self.focusedWID = wid
+                    self.scan()
+                }
+            }
+        }
+    }
+
+    // Outer nil when the app didn't answer in time.
+    private static func focusedWindowID(of pid: pid_t) -> CGWindowID?? {
+        let appRef = AXUIElementCreateApplication(pid)
         var windowRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
-              let windowRef else { return nil }
+        let error = AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &windowRef)
+        if error == .cannotComplete { return nil }
+        guard error == .success, let windowRef else { return .some(nil) }
         var wid: CGWindowID = 0
-        guard _AXUIElementGetWindow(windowRef as! AXUIElement, &wid) == .success, wid != 0 else { return nil }
+        guard _AXUIElementGetWindow(windowRef as! AXUIElement, &wid) == .success, wid != 0 else { return .some(nil) }
         return wid
     }
 
-    private func axWindows(of pid: pid_t) -> [AXUIElement] {
+    private static func axWindows(of pid: pid_t) -> [AXUIElement] {
         let appRef = AXUIElementCreateApplication(pid)
         var windowsRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) == .success,
@@ -371,7 +454,7 @@ class MultiWindowTracker {
     }
 
     // Matches by window id, falling back to frame for windows that don't expose one.
-    private func matchAXWindow(wid: CGWindowID, frame: CGRect, in windows: [AXUIElement]) -> AXUIElement? {
+    private static func matchAXWindow(wid: CGWindowID, frame: CGRect, in windows: [AXUIElement]) -> AXUIElement? {
         for window in windows {
             var windowID: CGWindowID = 0
             if _AXUIElementGetWindow(window, &windowID) == .success, windowID == wid {

@@ -2,6 +2,42 @@
 import Cocoa
 import ApplicationServices
 
+// AX calls block until the target app answers, so they run on this serial
+// queue and their results are applied on main. Overlay motion and clipping
+// never wait on them.
+enum AXQueue {
+    static let queue: DispatchQueue = {
+        // The system-wide element sets the timeout for every AX call this
+        // process makes, including ones on window and button elements. A hung
+        // app then holds the queue for this long instead of the 6s default.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
+        return DispatchQueue(label: "Trois.ax", qos: .userInteractive)
+    }()
+
+    static func async(_ work: @escaping () -> Void) {
+        queue.async(execute: work)
+    }
+}
+
+/// A target window's AX state, read on AXQueue.
+struct WindowSnapshot {
+    let window: AXUIElement
+    let frame: CGRect
+    let buttons: ButtonFrames
+    let closeButton: AXUIElement?
+    let minimizeButton: AXUIElement?
+    let zoomButton: AXUIElement?
+    let isFullScreen: Bool
+}
+
+enum WindowRead {
+    case window(WindowSnapshot)
+    // No frame or no buttons.
+    case unusable(frame: CGRect?)
+    // The app didn't answer in time. Whatever was shown before still stands.
+    case timedOut
+}
+
 class OverlayManager {
     private var closeOverlay: OverlayWindow?
     private var minimizeOverlay: OverlayWindow?
@@ -13,38 +49,94 @@ class OverlayManager {
     // Button frames relative to the target's top-left corner. Buttons stay put
     // relative to that corner while the window moves, so a move needs no AX reads.
     private var offsets = ButtonFrames()
+    private(set) var isRefreshing = false
+    private var refreshAgain = false
+    private var removed = false
+    // Called on main after each refresh() is applied.
+    var didRefresh: ((WindowRead) -> Void)?
 
     init(targetWID: CGWindowID) {
         self.targetWID = targetWID
     }
 
-    /// Re-reads button frames through AX. Slow; for new windows, resizes, and layout changes.
-    /// Returns false and hides the overlays when the window has no buttons.
-    @discardableResult
-    func refresh(window: AXUIElement) -> Bool {
-        guard let frame = axFrame(of: window) else {
-            hideOverlays()
-            return false
+    /// Reads a window's frame and buttons. Slow; call on AXQueue.
+    static func read(_ window: AXUIElement) -> WindowRead {
+        do {
+            guard let frame = try axFrame(of: window) else { return .unusable(frame: nil) }
+            let close = try button(of: window, kAXCloseButtonAttribute)
+            let minimize = try button(of: window, kAXMinimizeButtonAttribute)
+            let zoom = try button(of: window, kAXZoomButtonAttribute)
+            let buttons = ButtonFrames(
+                close: try close.flatMap { try axFrame(of: $0) },
+                minimize: try minimize.flatMap { try axFrame(of: $0) },
+                zoom: try zoom.flatMap { try axFrame(of: $0) }
+            )
+            guard buttons.close != nil || buttons.minimize != nil || buttons.zoom != nil else {
+                return .unusable(frame: frame)
+            }
+            let fullScreen = try value(of: window, "AXFullScreen") as? Bool ?? false
+            return .window(WindowSnapshot(
+                window: window, frame: frame, buttons: buttons,
+                closeButton: close, minimizeButton: minimize, zoomButton: zoom,
+                isFullScreen: fullScreen
+            ))
+        } catch {
+            return .timedOut
         }
-        targetFrame = frame
-        guard let frames = buttonFrames(for: window) else {
-            hideOverlays()
-            return false
-        }
-        offsets = ButtonFrames(
-            close: frames.close?.offsetBy(dx: -frame.minX, dy: -frame.minY),
-            minimize: frames.minimize?.offsetBy(dx: -frame.minX, dy: -frame.minY),
-            zoom: frames.zoom?.offsetBy(dx: -frame.minX, dy: -frame.minY)
-        )
-        updateOverlays(for: window, frames: frames)
-        return true
     }
 
-    /// Re-reads buttons from the window refresh(window:) last used.
+    /// Places the overlays from a read. Returns false when there is nothing to
+    /// show; unusable windows also get their overlays hidden.
     @discardableResult
-    func refresh() -> Bool {
-        guard let window = currentWindow else { return false }
-        return refresh(window: window)
+    func apply(_ read: WindowRead) -> Bool {
+        switch read {
+        case .timedOut:
+            return false
+        case .unusable(let frame):
+            if let frame {
+                targetFrame = frame
+            }
+            hideOverlays()
+            return false
+        case .window(let snapshot):
+            // The window may have moved while AX was read. Offsets hold either
+            // way, so place them against where the window is now.
+            let axFrame = snapshot.frame
+            let origin = WindowServer.bounds(of: targetWID)?.origin ?? axFrame.origin
+            targetFrame = CGRect(origin: origin, size: axFrame.size)
+            offsets = ButtonFrames(
+                close: snapshot.buttons.close?.offsetBy(dx: -axFrame.minX, dy: -axFrame.minY),
+                minimize: snapshot.buttons.minimize?.offsetBy(dx: -axFrame.minX, dy: -axFrame.minY),
+                zoom: snapshot.buttons.zoom?.offsetBy(dx: -axFrame.minX, dy: -axFrame.minY)
+            )
+            updateOverlays(for: snapshot)
+            return true
+        }
+    }
+
+    /// Re-reads the window apply(_:) last used, then calls didRefresh. For
+    /// resizes and layout changes. Requests made while one runs are merged into
+    /// one more read.
+    func refresh() {
+        guard let window = currentWindow, !removed else { return }
+        guard !isRefreshing else {
+            refreshAgain = true
+            return
+        }
+        isRefreshing = true
+        AXQueue.async { [weak self] in
+            let read = Self.read(window)
+            DispatchQueue.main.async {
+                guard let self, !self.removed else { return }
+                self.isRefreshing = false
+                self.apply(read)
+                self.didRefresh?(read)
+                if self.refreshAgain {
+                    self.refreshAgain = false
+                    self.refresh()
+                }
+            }
+        }
     }
 
     /// Moves the overlays with the target using cached offsets, in one
@@ -87,12 +179,19 @@ class OverlayManager {
         return result
     }
 
-    private func axFrame(of element: AXUIElement) -> CGRect? {
-        var positionRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let positionRef, let sizeRef else { return nil }
+    private struct AXTimedOut: Error {}
+
+    // Nil when the attribute is missing. Throws when the app didn't answer.
+    private static func value(of element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
+        var ref: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &ref)
+        if error == .cannotComplete { throw AXTimedOut() }
+        return error == .success ? ref : nil
+    }
+
+    private static func axFrame(of element: AXUIElement) throws -> CGRect? {
+        guard let positionRef = try value(of: element, kAXPositionAttribute),
+              let sizeRef = try value(of: element, kAXSizeAttribute) else { return nil }
         var position = CGPoint.zero
         var size = CGSize.zero
         AXValueGetValue(positionRef as! AXValue, .cgPoint, &position)
@@ -100,49 +199,43 @@ class OverlayManager {
         return CGRect(origin: position, size: size)
     }
 
-    private func buttonFrames(for window: AXUIElement) -> ButtonFrames? {
-        var frames = ButtonFrames()
-        frames.close = getButton(for: window, attribute: kAXCloseButtonAttribute as CFString).flatMap(axFrame)
-        frames.minimize = getButton(for: window, attribute: kAXMinimizeButtonAttribute as CFString).flatMap(axFrame)
-        frames.zoom = getButton(for: window, attribute: kAXZoomButtonAttribute as CFString).flatMap(axFrame)
-        if frames.close != nil || frames.minimize != nil || frames.zoom != nil {
-            return frames
-        }
-        return nil
+    private static func button(of window: AXUIElement, _ attribute: String) throws -> AXUIElement? {
+        guard let ref = try value(of: window, attribute) else { return nil }
+        return (ref as! AXUIElement)
     }
 
-    private func updateOverlays(for window: AXUIElement, frames: ButtonFrames) {
-        currentWindow = window
-        let zoomed = isWindowZoomed(window)
+    private func updateOverlays(for snapshot: WindowSnapshot) {
+        currentWindow = snapshot.window
+        let zoomed = snapshot.isFullScreen || fillsScreen(targetFrame)
 
-        if let closeFrame = frames.close {
+        if let offset = offsets.close {
             if closeOverlay == nil {
                 closeOverlay = OverlayWindow(buttonType: .close)
             }
-            closeOverlay?.updateFrame(closeFrame)
-            closeOverlay?.targetButton = getButton(for: window, attribute: kAXCloseButtonAttribute as CFString)
+            closeOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
+            closeOverlay?.targetButton = snapshot.closeButton
             closeOverlay?.alphaValue = 1
         } else {
             closeOverlay?.orderOut(nil)
         }
 
-        if let minimizeFrame = frames.minimize {
+        if let offset = offsets.minimize {
             if minimizeOverlay == nil {
                 minimizeOverlay = OverlayWindow(buttonType: .minimize)
             }
-            minimizeOverlay?.updateFrame(minimizeFrame)
-            minimizeOverlay?.targetButton = getButton(for: window, attribute: kAXMinimizeButtonAttribute as CFString)
+            minimizeOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
+            minimizeOverlay?.targetButton = snapshot.minimizeButton
             minimizeOverlay?.alphaValue = 1
         } else {
             minimizeOverlay?.orderOut(nil)
         }
 
-        if let zoomFrame = frames.zoom {
+        if let offset = offsets.zoom {
             if zoomOverlay == nil {
                 zoomOverlay = OverlayWindow(buttonType: .zoom)
             }
-            zoomOverlay?.updateFrame(zoomFrame)
-            zoomOverlay?.targetButton = getButton(for: window, attribute: kAXZoomButtonAttribute as CFString)
+            zoomOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
+            zoomOverlay?.targetButton = snapshot.zoomButton
             zoomOverlay?.setZoomedState(zoomed)
             zoomOverlay?.alphaValue = 1
         } else {
@@ -150,27 +243,10 @@ class OverlayManager {
         }
     }
 
-    /// Check if window is in zoomed/fullscreen state
-    private func isWindowZoomed(_ window: AXUIElement) -> Bool {
-        // Check fullscreen attribute first
-        var fullscreenRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &fullscreenRef) == .success,
-           let isFullscreen = fullscreenRef as? Bool, isFullscreen {
-            return true
-        }
-
-        // Check if window fills the screen (zoomed but not fullscreen)
-        var positionRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionRef) == .success,
-              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef) == .success else {
-            return false
-        }
-
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        AXValueGetValue(positionRef as! AXValue, .cgPoint, &position)
-        AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
+    /// Check if a window frame (global top-left) fills its screen, zoomed but not fullscreen
+    private func fillsScreen(_ frame: CGRect) -> Bool {
+        let position = frame.origin
+        let size = frame.size
 
         // Find the screen containing this window
         guard let primaryScreen = NSScreen.screens.first else { return false }
@@ -189,15 +265,8 @@ class OverlayManager {
         return false
     }
 
-    private func getButton(for window: AXUIElement, attribute: CFString) -> AXUIElement? {
-        var buttonRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, attribute, &buttonRef) == .success else {
-            return nil
-        }
-        return (buttonRef as! AXUIElement)
-    }
-
     func removeAllOverlays() {
+        removed = true
         closeOverlay?.close()
         minimizeOverlay?.close()
         zoomOverlay?.close()
@@ -546,7 +615,9 @@ class OverlayWindow: NSWindow {
 
     private func performButtonAction() {
         guard let button = targetButton else { return }
-        AXUIElementPerformAction(button, kAXPressAction as CFString)
+        AXQueue.async {
+            AXUIElementPerformAction(button, kAXPressAction as CFString)
+        }
     }
 
     override func mouseEntered(with event: NSEvent) {
