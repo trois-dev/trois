@@ -76,9 +76,32 @@ extension ThemeManager {
         UserDefaults.standard.string(forKey: "currentThemeId") == draftDirectory.path
     }
 
-    /// Makes the draft match what's live, unless the draft is what's live.
-    func prepareDraft() {
-        guard !isDraftApplied || !fileManager.fileExists(atPath: draftDirectory.path) else { return }
+    // Set by any edit, cleared when the draft is saved as a theme or started over.
+    private var draftHasUnsavedEdits: Bool {
+        get { UserDefaults.standard.bool(forKey: "draftHasUnsavedEdits") }
+        set { UserDefaults.standard.set(newValue, forKey: "draftHasUnsavedEdits") }
+    }
+
+    /// Makes the draft match what's live, unless the draft is what's live or
+    /// holds unsaved edits. True when it kept edits another theme replaced;
+    /// the editor then asks whether to resume or discard them.
+    @discardableResult
+    func prepareDraft() -> Bool {
+        if fileManager.fileExists(atPath: draftDirectory.path) {
+            if isDraftApplied { return false }
+            if draftHasUnsavedEdits { return true }
+        }
+        snapshotLiveIntoDraft()
+        return false
+    }
+
+    /// Applies the draft again after another theme replaced it.
+    func resumeDraft() {
+        applyTheme(draftTheme())
+    }
+
+    /// Drops the draft's edits and starts again from what's live.
+    func discardDraft() {
         snapshotLiveIntoDraft()
     }
 
@@ -114,29 +137,40 @@ extension ThemeManager {
         manifest.version = info.version
         manifest.source = source
         try? writeManifest(manifest, to: draftDirectory)
+        draftHasUnsavedEdits = true
         if isDraftApplied { currentTheme = draftTheme() }
     }
 
     /// Puts an image in one draft slot, or clears the slot when `source` is
     /// nil, then applies the draft. Generated states of the same button are
-    /// remade from it, and frame widgets are updated to match.
-    func setDraftImage(_ source: URL?, forKey defaultsKey: String) {
-        guard let slot = ButtonSlot.all.first(where: { $0.defaultsKey == defaultsKey }) else { return }
+    /// remade from it, and frame widgets are updated to match. Returns why
+    /// the image wasn't used.
+    @discardableResult
+    func setDraftImage(_ source: URL?, forKey defaultsKey: String) -> String? {
+        guard let slot = ButtonSlot.all.first(where: { $0.defaultsKey == defaultsKey }) else { return nil }
         ensureDraft()
         // Read first: the source may be the file this slot replaces.
-        let data = source.flatMap { try? Data(contentsOf: $0) }
-        if source != nil && data == nil { return }
+        var data: Data?
+        if let source {
+            do { data = try Data(contentsOf: source) } catch { return "Couldn't read the image. \(error.localizedDescription)" }
+        }
 
         var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
-        removeButton(slot.manifestKey, from: &manifest)
         if let source, let data {
+            // The new file is written before the old one goes, so a failed write loses nothing.
             let name = slot.fileName(extension: source.pathExtension)
             do {
                 try data.write(to: draftDirectory.appendingPathComponent(name), options: .atomic)
-                manifest.buttons = (manifest.buttons ?? [:]).merging([slot.manifestKey: name]) { $1 }
             } catch {
-                print("Failed to write draft image: \(error)")
+                return "Couldn't write the image. \(error.localizedDescription)"
             }
+            if let old = manifest.buttons?[slot.manifestKey], old != name {
+                try? fileManager.removeItem(at: draftDirectory.appendingPathComponent(URL(fileURLWithPath: old).lastPathComponent))
+            }
+            unmarkGenerated(slot.manifestKey, in: &manifest)
+            manifest.buttons = (manifest.buttons ?? [:]).merging([slot.manifestKey: name]) { $1 }
+        } else {
+            removeButton(slot.manifestKey, from: &manifest)
         }
 
         var changed = [slot.manifestKey]
@@ -151,6 +185,7 @@ extension ThemeManager {
             pushToFrame(changed, manifest: &manifest)
         }
         saveDraft(manifest)
+        return nil
     }
 
     /// Makes the given slots from their button's normal image and marks them
@@ -219,22 +254,37 @@ extension ThemeManager {
     }
 
     /// Puts another theme's frame in the draft, or removes the draft's frame
-    /// when `directory` is nil, then applies the draft.
-    func useDraftFrame(from directory: URL?) {
+    /// when `directory` is nil, then applies the draft. Returns why the frame
+    /// wasn't used.
+    @discardableResult
+    func useDraftFrame(from directory: URL?) -> String? {
         ensureDraft()
         let frame = draftDirectory.appendingPathComponent("frame", isDirectory: true)
+        // Copied beside the old frame first, so a failed copy keeps it.
+        let incoming = draftDirectory.appendingPathComponent(".frame-new", isDirectory: true)
+        if let directory {
+            try? fileManager.removeItem(at: incoming)
+            do {
+                try fileManager.copyItem(at: directory, to: incoming)
+            } catch {
+                try? fileManager.removeItem(at: incoming)
+                return "Couldn't copy the frame. \(error.localizedDescription)"
+            }
+        }
         try? fileManager.removeItem(at: frame)
         try? fileManager.removeItem(at: layoutBaseline)
-        if let directory {
+        if directory != nil {
             do {
-                try fileManager.copyItem(at: directory, to: frame)
+                try fileManager.moveItem(at: incoming, to: frame)
             } catch {
-                print("Failed to copy frame: \(error)")
+                try? fileManager.removeItem(at: incoming)
+                return "Couldn't copy the frame. \(error.localizedDescription)"
             }
         }
         var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
         for art in FrameArt.allCases { unmarkGenerated(art.generatedKey, in: &manifest) }
         saveDraft(manifest)
+        return nil
     }
 
     /// Cuts the close, minimize and zoom images out of the frame art.
@@ -297,12 +347,15 @@ extension ThemeManager {
         return (layout[side.rawValue] as? [[Int]] ?? []).compactMap { $0.count == 2 ? ($0[0], $0[1]) : nil }
     }
 
-    /// Sets the draft frame's title style, then applies the draft.
-    func setDraftTitleStyle(_ style: TitleStyle) {
-        guard let directory = draftFrameDirectory else { return }
+    /// Sets the draft frame's title style, then applies the draft. Returns
+    /// why the style wasn't saved.
+    @discardableResult
+    func setDraftTitleStyle(_ style: TitleStyle) -> String? {
+        guard let directory = draftFrameDirectory else { return "This theme has no window frame." }
         saveLayoutBaseline()
-        guard WindowFrame.writeTitleStyle(style, in: directory) else { return }
+        guard WindowFrame.writeTitleStyle(style, in: directory) else { return "Couldn't write the layout." }
         saveDraft(readManifest(in: draftDirectory) ?? ThemeManifest())
+        return nil
     }
 
     /// The title style as it was when the frame came in.
@@ -397,36 +450,26 @@ extension ThemeManager {
     }
 
     /// Copies the draft, frame included, into a new theme folder named after
-    /// the draft's name.
-    func saveCustomTheme() -> String? {
+    /// the draft's name. Returns the folder.
+    func saveCustomTheme() throws -> URL {
         ensureDraft()
         guard let manifest = readManifest(in: draftDirectory),
-              manifest.buttons?.isEmpty == false || draftFrameDirectory != nil else { return nil }
-        let name = manifest.name ?? "Custom Theme"
-
-        // Create safe folder name
-        let safeName = name.replacingOccurrences(of: "[^a-zA-Z0-9_\\- ]", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespaces)
-        let folderName = safeName.isEmpty ? "Custom Theme" : safeName
-
-        var destDir = themesDirectory.appendingPathComponent(folderName)
-
-        // Add number suffix if exists
-        var suffix = 1
-        while fileManager.fileExists(atPath: destDir.path) {
-            destDir = themesDirectory.appendingPathComponent("\(folderName) \(suffix)")
-            suffix += 1
+              manifest.buttons?.isEmpty == false || draftFrameDirectory != nil else {
+            throw ThemeInstallError.noButtons
         }
+        let safeName = (manifest.name ?? "").replacingOccurrences(of: "[^a-zA-Z0-9_\\- ]", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        let destination = ThemeInstaller.unusedFolder(named: safeName.isEmpty ? "Custom Theme" : safeName, in: themesDirectory)
 
         do {
-            try fileManager.copyItem(at: draftDirectory, to: destDir)
-            try? fileManager.removeItem(at: destDir.appendingPathComponent(layoutBaseline.lastPathComponent))
-            return destDir.path
+            try fileManager.copyItem(at: draftDirectory, to: destination)
         } catch {
-            print("Failed to save custom theme: \(error)")
-            try? fileManager.removeItem(at: destDir)
-            return nil
+            try? fileManager.removeItem(at: destination)
+            throw error
         }
+        try? fileManager.removeItem(at: destination.appendingPathComponent(layoutBaseline.lastPathComponent))
+        draftHasUnsavedEdits = false
+        return destination
     }
 
     // MARK: - Files
@@ -437,6 +480,7 @@ extension ThemeManager {
 
     private func saveDraft(_ manifest: ThemeManifest) {
         try? writeManifest(manifest, to: draftDirectory)
+        draftHasUnsavedEdits = true
         applyTheme(draftTheme())
     }
 
@@ -464,6 +508,7 @@ extension ThemeManager {
             try writeManifest(manifest, to: staging)
             try? fileManager.removeItem(at: draftDirectory)
             try fileManager.moveItem(at: staging, to: draftDirectory)
+            draftHasUnsavedEdits = false
         } catch {
             print("Failed to snapshot draft: \(error)")
             try? fileManager.removeItem(at: staging)

@@ -175,6 +175,8 @@ struct ThemeEditorView: View {
     @State private var titleStyle = TitleStyle()
     @State private var titleBaseline: TitleStyle?
     @State private var titleWrite: DispatchWorkItem?
+    // The draft has edits another theme replaced; asks whether to resume them.
+    @State private var askResume = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -182,7 +184,19 @@ struct ThemeEditorView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 8)
             Divider()
+            // On its own view: a second alert on the view with the other one wouldn't show.
             canvas
+                .alert("Unsaved Edits", isPresented: $askResume) {
+                    Button("Keep Editing") { themeManager.resumeDraft() }
+                    Button("Start Over", role: .destructive) {
+                        discardTitleEdit()
+                        clearUndo()
+                        themeManager.discardDraft()
+                        reload()
+                    }
+                } message: {
+                    Text("The editor has changes that weren't saved as a theme. Keep editing them, or start over from the theme that's applied now?")
+                }
             Divider()
             inspector
                 .frame(maxWidth: .infinity)
@@ -193,7 +207,7 @@ struct ThemeEditorView: View {
         }
         // Edits go to a draft copy of whatever is applied, frame included.
         .onAppear {
-            themeManager.prepareDraft()
+            askResume = themeManager.prepareDraft()
             reload()
         }
         .onReceive(NotificationCenter.default.publisher(for: .init("TroisReloadImages"))) { _ in reload() }
@@ -316,6 +330,7 @@ struct ThemeEditorView: View {
     private var footer: some View {
         HStack(spacing: 12) {
             Button("Reset All") {
+                discardTitleEdit()
                 clearUndo()
                 themeManager.resetDraft()
             }
@@ -353,11 +368,12 @@ struct ThemeEditorView: View {
     private func save() {
         // The sheet's edits may not have reached the draft yet.
         themeManager.setDraftInfo(info)
-        if let path = themeManager.saveCustomTheme() {
+        do {
+            let folder = try themeManager.saveCustomTheme()
             themeManager.loadThemes()
-            alert = ("Theme Saved", "Theme saved to:\n\(path)")
-        } else {
-            alert = ("Theme Not Saved", "Make sure you have a custom image or a frame.")
+            alert = ("Theme Saved", "Theme saved to:\n\(folder.path)")
+        } catch {
+            alert = ("Theme Not Saved", error.localizedDescription)
         }
     }
 
@@ -683,7 +699,7 @@ struct ThemeEditorView: View {
         case .theme, .title:
             break
         case .button(let button):
-            themeManager.setDraftImage(url, forKey: button.key(state.buttonSuffix))
+            report(themeManager.setDraftImage(url, forKey: button.key(state.buttonSuffix)))
         case .frame, .edge:
             report(themeManager.setDraftFrameArt(url, for: state.frameArt))
         }
@@ -728,10 +744,25 @@ struct ThemeEditorView: View {
         titleWrite?.cancel()
         let write = DispatchWorkItem {
             titleWrite = nil
-            themeManager.setDraftTitleStyle(titleStyle)
+            if let problem = themeManager.setDraftTitleStyle(titleStyle) {
+                report(problem)
+                reload()
+            }
         }
         titleWrite = write
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: write)
+    }
+
+    // A title edit still waiting to be written belongs to the frame it was made on.
+    private func discardTitleEdit() {
+        titleWrite?.cancel()
+        titleWrite = nil
+    }
+
+    private func useFrame(from directory: URL?) {
+        discardTitleEdit()
+        clearUndo()
+        report(themeManager.useDraftFrame(from: directory))
     }
 
     private func clearUndo() {
@@ -835,7 +866,7 @@ struct ThemeEditorView: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
-                    FrameSourceMenu(picked: clearUndo)
+                    FrameSourceMenu(picked: useFrame)
                     HStack {
                         if frame?.k1 == nil {
                             Menu("Edit Edge") {
@@ -854,10 +885,7 @@ struct ThemeEditorView: View {
                             Button("Put Buttons in Frame") { themeManager.putButtonsInFrame() }
                                 .disabled(!hasCustomImages)
                             Divider()
-                            Button("Remove Frame") {
-                                clearUndo()
-                                themeManager.useDraftFrame(from: nil)
-                            }
+                            Button("Remove Frame") { useFrame(from: nil) }
                         }
                         .fixedSize()
                     }
@@ -868,7 +896,7 @@ struct ThemeEditorView: View {
                 Text("No window frame. Take one from another theme.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                FrameSourceMenu(picked: clearUndo)
+                FrameSourceMenu(picked: useFrame)
             }
         }
     }
@@ -877,16 +905,13 @@ struct ThemeEditorView: View {
 // Its own view so the long theme list is only rebuilt when themes change.
 private struct FrameSourceMenu: View {
     @ObservedObject private var themeManager = ThemeManager.shared
-    var picked: () -> Void = {}
+    let picked: (URL?) -> Void
 
     var body: some View {
         let framed = themeManager.themes.filter { $0.frameDirectory != nil }
         Menu("Use Frame From") {
             ForEach(framed) { theme in
-                Button(theme.name) {
-                    picked()
-                    themeManager.useDraftFrame(from: theme.frameDirectory)
-                }
+                Button(theme.name) { picked(theme.frameDirectory) }
             }
         }
         .disabled(framed.isEmpty)
@@ -1693,11 +1718,11 @@ private struct TitleInspector: View {
             GridRow {
                 Text("Color")
                 HStack(spacing: 12) {
-                    colorChoice(\.color, active: true, help: "Auto picks a color that reads on the title bar art")
+                    colorChoice(\.color, active: true, help: "Auto uses the color the frame art holds")
                     Text("Inactive")
-                    colorChoice(\.inactiveColor, active: false, help: "Auto dims the active color")
+                    colorChoice(\.inactiveColor, active: false, help: "Auto uses the inactive art's color, or dims a set active color")
                     Spacer()
-                    Button("Revert") { style = baseline ?? TitleStyle() }
+                    Button("Revert") { style = baseline ?? frame.titleStyle }
                         .disabled((baseline ?? frame.titleStyle) == style)
                         .help("Put the title back as it came with the frame")
                 }
@@ -1789,7 +1814,7 @@ private struct TitleInspector: View {
     private func number(_ label: String, _ value: CGFloat, _ range: ClosedRange<CGFloat>,
                         _ set: @escaping (CGFloat) -> Void) -> some View {
         Stepper(value: Binding(get: { value }, set: set), in: range) {
-            Text("\(label) \(Int(value))").monospacedDigit()
+            Text("\(label) \(value.formatted())").monospacedDigit()
         }
     }
 }
