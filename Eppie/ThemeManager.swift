@@ -32,9 +32,12 @@ struct Theme: Identifiable, Hashable {
     var helpDisabled: URL?
     // Kaleidoscope window frame folder (frame/layout.json and images).
     var frameDirectory: URL?
+    // Catalog id from the marker a gallery install leaves in the folder.
+    var catalogID: String?
 
+    // A frame alone is a theme too; the system buttons show over it.
     var hasAnyImage: Bool {
-        closeUp != nil || minimizeUp != nil || maximizeUp != nil
+        closeUp != nil || minimizeUp != nil || maximizeUp != nil || frameDirectory != nil
     }
 }
 
@@ -139,6 +142,26 @@ class ThemeManager: ObservableObject {
         "platinum": "maxonico"
     ]
 
+    static let imageExtensions: Set<String> = ["bmp", "png", "jpg", "jpeg", "gif", "tif", "tiff"]
+
+    // File name patterns from the Windows gallery. Down and disabled come first because
+    // some up patterns are substrings of them. import_theme.py in trois-themes mirrors this.
+    private static let nameGuesses: [(slot: WritableKeyPath<Theme, URL?>, patterns: [String])] = [
+        (\.closeDown, ["closedwn", "closedown", "close_down", "close down", "close button down", "close window button down", "close_dw", "1closedn"]),
+        (\.closeDisabled, ["closedis", "close_disable", "close disabled", "close button disabled", "close gray", "close_ds", "1closedis"]),
+        (\.closeUp, ["closeup", "close_up", "close up", "close button up", "close window button", "1closeup"]),
+        (\.minimizeDown, ["mindwn", "mindown", "min_down", "min down", "min dwn", "mini_dwn", "minim_dw", "minimize_down", "minimize down", "minimize button down", "1mindn"]),
+        (\.minimizeDisabled, ["mindis", "min_disable", "min disabled", "min gray", "mini_dis", "minim_ds", "minimize_dis", "minimize button disabled", "1mindis"]),
+        (\.minimizeUp, ["minup", "min_up", "min up", "mini_up", "minim_up", "minimize_up", "minimize up", "minimize button up", "1minup"]),
+        (\.maximizeDown, ["maxdwn", "maxdown", "max_down", "max down", "max dwn", "maxim_dw", "maximize_down", "maximize down", "maximize button down", "1maxdn"]),
+        (\.maximizeDisabled, ["maxdis", "max_disable", "max disabled", "max gray", "maxim_ds", "maximize_dis", "maximize button disabled", "1maxdis"]),
+        (\.maximizeUp, ["maxup", "max_up", "max up", "maxim_up", "maximize_up", "maximize up", "maximize button up", "1maxup"]),
+        (\.restoreDown, ["resdwn", "resdown", "restore down", "restore_down", "restore_dw", "rst_dwn", "restore button down", "1resdn"]),
+        (\.restoreUp, ["resup", "restore up", "restore_up", "restore button up", "rst_up", "1resup"]),
+        (\.helpDown, ["helpdwn", "helpdown", "help down", "help dwn", "help button down", "1helpdn"]),
+        (\.helpUp, ["helpup", "help up", "help button up", "1helpup"])
+    ]
+
     init() {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         themesDirectory = appSupport.appendingPathComponent("Trois/Themes", isDirectory: true)
@@ -171,9 +194,16 @@ class ThemeManager: ObservableObject {
         return themes
     }
 
-    /// Reads a theme folder. Nil when it has no close, minimize or zoom image.
+    /// Reads a theme folder. Nil when it has no close, minimize or zoom image and no frame.
     /// Safe to call off the main thread.
     func loadTheme(from directory: URL) -> Theme? {
+        var theme = loadThemeContents(from: directory)
+        theme?.catalogID = (try? String(contentsOf: directory.appendingPathComponent(ThemeInstaller.catalogMarker), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return theme
+    }
+
+    private func loadThemeContents(from directory: URL) -> Theme? {
         let name = directory.lastPathComponent
         var theme = Theme(id: directory.path, name: name, path: directory)
 
@@ -185,8 +215,8 @@ class ThemeManager: ObservableObject {
             theme.source = manifest.source.flatMap(URL.init(string:))
             if let buttons = manifest.buttons {
                 applyManifestButtons(buttons, in: directory, to: &theme)
+                theme.frameDirectory = frameDirectory(in: directory)
                 if theme.hasAnyImage {
-                    theme.frameDirectory = frameDirectory(in: directory)
                     return theme
                 }
             }
@@ -199,41 +229,11 @@ class ThemeManager: ObservableObject {
             return nil
         }
 
-        let imageExtensions = ["bmp", "png", "jpg", "jpeg", "tiff", "gif"]
-
         for file in files {
-            let ext = file.pathExtension.lowercased()
-            guard imageExtensions.contains(ext) else { continue }
-
+            guard Self.imageExtensions.contains(file.pathExtension.lowercased()) else { continue }
             let filename = file.deletingPathExtension().lastPathComponent.lowercased()
-
-            // Match common naming patterns from the Windows gallery
-            if matchesPattern(filename, patterns: ["closeup", "close_up", "close up", "close button up", "close window button", "1closeup"]) {
-                theme.closeUp = file
-            } else if matchesPattern(filename, patterns: ["closedwn", "closedown", "close_down", "close down", "close button down", "close window button down", "close_dw", "1closedn"]) {
-                theme.closeDown = file
-            } else if matchesPattern(filename, patterns: ["closedis", "close_disable", "close disabled", "close button disabled", "close gray", "close_ds", "1closedis"]) {
-                theme.closeDisabled = file
-            } else if matchesPattern(filename, patterns: ["minup", "min_up", "min up", "mini_up", "minim_up", "minimize_up", "minimize up", "minimize button up", "1minup"]) {
-                theme.minimizeUp = file
-            } else if matchesPattern(filename, patterns: ["mindwn", "mindown", "min_down", "min down", "min dwn", "mini_dwn", "minim_dw", "minimize_down", "minimize down", "minimize button down", "1mindn"]) {
-                theme.minimizeDown = file
-            } else if matchesPattern(filename, patterns: ["mindis", "min_disable", "min disabled", "min gray", "mini_dis", "minim_ds", "minimize_dis", "minimize button disabled", "1mindis"]) {
-                theme.minimizeDisabled = file
-            } else if matchesPattern(filename, patterns: ["maxup", "max_up", "max up", "maxim_up", "maximize_up", "maximize up", "maximize button up", "1maxup"]) {
-                theme.maximizeUp = file
-            } else if matchesPattern(filename, patterns: ["maxdwn", "maxdown", "max_down", "max down", "max dwn", "maxim_dw", "maximize_down", "maximize down", "maximize button down", "1maxdn"]) {
-                theme.maximizeDown = file
-            } else if matchesPattern(filename, patterns: ["maxdis", "max_disable", "max disabled", "max gray", "maxim_ds", "maximize_dis", "maximize button disabled", "1maxdis"]) {
-                theme.maximizeDisabled = file
-            } else if matchesPattern(filename, patterns: ["resup", "restore up", "restore_up", "restore button up", "rst_up", "1resup"]) {
-                theme.restoreUp = file
-            } else if matchesPattern(filename, patterns: ["resdwn", "resdown", "restore down", "restore_down", "restore_dw", "rst_dwn", "restore button down", "1resdn"]) {
-                theme.restoreDown = file
-            } else if matchesPattern(filename, patterns: ["helpup", "help up", "help button up", "1helpup"]) {
-                theme.helpUp = file
-            } else if matchesPattern(filename, patterns: ["helpdwn", "helpdown", "help down", "help dwn", "help button down", "1helpdn"]) {
-                theme.helpDown = file
+            if let guess = Self.nameGuesses.first(where: { matchesPattern(filename, patterns: $0.patterns) }) {
+                theme[keyPath: guess.slot] = file
             }
         }
 
@@ -389,13 +389,19 @@ class ThemeManager: ObservableObject {
         themes.first { $0.path.standardizedFileURL.path == folder.standardizedFileURL.path }
     }
 
-    /// Themes in the themes folder by folder name, which is the catalog id
-    /// for catalog themes.
-    func installedThemesByFolder() -> [String: Theme] {
+    /// Gallery themes in the themes folder by catalog id. A folder counts when a
+    /// gallery install marked it, or, for installs from before the marker, when
+    /// its name is the id and its name and author match the catalog's.
+    func installedCatalogThemes(_ catalog: [String: CatalogTheme]) -> [String: Theme] {
         let folder = themesDirectory.standardizedFileURL.path
         var result: [String: Theme] = [:]
         for theme in themes where theme.path.standardizedFileURL.deletingLastPathComponent().path == folder {
-            result[theme.path.lastPathComponent] = theme
+            let id = theme.path.lastPathComponent
+            if let catalogID = theme.catalogID {
+                if catalogID == id { result[id] = theme }
+            } else if let entry = catalog[id], entry.name == theme.name, entry.author == theme.author {
+                result[id] = theme
+            }
         }
         return result
     }

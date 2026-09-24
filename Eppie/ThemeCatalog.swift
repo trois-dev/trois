@@ -10,6 +10,7 @@ enum ThemeInstallError: LocalizedError {
     case tooLarge
     case unsafeArchive(String)
     case noButtons
+    case folderInUse(String)
     case failed(String)
 
     var errorDescription: String? {
@@ -20,7 +21,8 @@ enum ThemeInstallError: LocalizedError {
         case .checksumMismatch: return "The downloaded theme didn't match the gallery, so it wasn't installed."
         case .tooLarge: return "The theme is too large."
         case .unsafeArchive(let reason): return "The theme wasn't installed: \(reason)"
-        case .noButtons: return "No close, minimize or zoom images were found."
+        case .noButtons: return "No close, minimize or zoom images or window frame were found."
+        case .folderInUse(let name): return "Another theme is already in the folder \(name). Rename or delete it, then try again."
         case .failed(let reason): return "The theme couldn't be installed. \(reason)"
         }
     }
@@ -37,10 +39,14 @@ enum ThemeInstaller {
     static let allowedExtensions: Set<String> = [
         "bmp", "png", "jpg", "jpeg", "gif", "tif", "tiff", "ico", "txt", "3dc", "ccs", "reg", "json",
     ]
+    // Holds the catalog id in folders the gallery installed.
+    static let catalogMarker = ".catalog"
 
-    /// Installs a zip or folder as `directory/name`, replacing a theme there.
-    /// Returns the installed folder.
-    static func install(from source: URL, as name: String, into directory: URL) throws -> URL {
+    /// Installs a zip or folder into `directory`. A gallery theme goes in a
+    /// folder named `catalogID`, replacing the previous version there; the
+    /// caller checks that folder holds that theme. Anything else goes in a new
+    /// folder named `name`, numbered if it's taken. Returns the installed folder.
+    static func install(from source: URL, as name: String, into directory: URL, catalogID: String? = nil) throws -> URL {
         let fileManager = FileManager.default
         let staging = fileManager.temporaryDirectory.appendingPathComponent("Trois-\(UUID().uuidString)")
         try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -68,7 +74,13 @@ enum ThemeInstaller {
         guard ThemeManager.shared.loadTheme(from: root) != nil else { throw ThemeInstallError.noButtons }
 
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        let destination = directory.appendingPathComponent(name, isDirectory: true)
+        guard let catalogID else {
+            let destination = unusedFolder(named: name, in: directory)
+            try fileManager.moveItem(at: root, to: destination)
+            return destination
+        }
+        try catalogID.write(to: root.appendingPathComponent(catalogMarker), atomically: true, encoding: .utf8)
+        let destination = directory.appendingPathComponent(catalogID, isDirectory: true)
         if fileManager.fileExists(atPath: destination.path) {
             // Moved aside rather than replaced in place. On a case-insensitive
             // volume an existing "AlphaProbe-412" would keep its casing, and the
@@ -85,6 +97,18 @@ enum ThemeInstaller {
             try fileManager.moveItem(at: root, to: destination)
         }
         return destination
+    }
+
+    // "name", or "name 2", "name 3" and so on. The space keeps it from ever
+    // matching a catalog id.
+    static func unusedFolder(named name: String, in directory: URL) -> URL {
+        var candidate = directory.appendingPathComponent(name, isDirectory: true)
+        var n = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = directory.appendingPathComponent("\(name) \(n)", isDirectory: true)
+            n += 1
+        }
+        return candidate
     }
 
     // Rejects symlinks and paths that leave the folder before anything is
@@ -280,7 +304,10 @@ final class ThemeCatalog: ObservableObject {
         return URL(string: "https://trois-dev.github.io/trois-themes/index.json")!
     }
 
-    @Published private(set) var themes: [CatalogTheme] = []
+    @Published private(set) var themes: [CatalogTheme] = [] {
+        didSet { byID = Dictionary(themes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }) }
+    }
+    private(set) var byID: [String: CatalogTheme] = [:]
     @Published private(set) var isLoading = false
     @Published private(set) var loadError: String?
     @Published private(set) var installing: Set<String> = []
@@ -333,7 +360,12 @@ final class ThemeCatalog: ObservableObject {
     /// `apply` is false. Calls completion on main. Unless `quiet`, failures
     /// also set installError.
     func install(_ id: String, apply: Bool = true, quiet: Bool = false, completion: ((Result<Theme, Error>) -> Void)? = nil) {
-        guard Self.isValidID(id), !installing.contains(id) else { return }
+        guard Self.isValidID(id) else {
+            completion?(.failure(ThemeInstallError.notInCatalog))
+            return
+        }
+        // Already on its way; the running install reports its own result.
+        guard !installing.contains(id) else { return }
         installing.insert(id)
         let done: (Result<Theme, Error>) -> Void = { result in
             self.installing.remove(id)
@@ -378,7 +410,15 @@ final class ThemeCatalog: ObservableObject {
             completion(.failure(ThemeInstallError.notInCatalog))
             return
         }
-        let themesDirectory = ThemeManager.shared.themesDirectory
+        let themeManager = ThemeManager.shared
+        let themesDirectory = themeManager.themesDirectory
+        // Never replace a folder the user made that happens to share the id.
+        let folder = themesDirectory.appendingPathComponent(entry.id).path
+        if FileManager.default.fileExists(atPath: folder),
+           themeManager.installedCatalogThemes([entry.id: entry])[entry.id] == nil {
+            completion(.failure(ThemeInstallError.folderInUse(entry.id)))
+            return
+        }
         URLSession.shared.downloadTask(with: url) { file, response, error in
             let result = Result<URL, Error> {
                 if let error {
@@ -396,10 +436,9 @@ final class ThemeCatalog: ObservableObject {
                 let zip = FileManager.default.temporaryDirectory.appendingPathComponent("Trois-\(UUID().uuidString).zip")
                 try data.write(to: zip)
                 defer { try? FileManager.default.removeItem(at: zip) }
-                return try ThemeInstaller.install(from: zip, as: entry.id, into: themesDirectory)
+                return try ThemeInstaller.install(from: zip, as: entry.id, into: themesDirectory, catalogID: entry.id)
             }
             DispatchQueue.main.async {
-                let themeManager = ThemeManager.shared
                 themeManager.loadThemes()
                 let installed = result.flatMap { folder -> Result<Theme, Error> in
                     guard let theme = themeManager.installedTheme(at: folder) else {

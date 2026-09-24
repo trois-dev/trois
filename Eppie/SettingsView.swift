@@ -75,7 +75,7 @@ struct CatalogView: View {
 
     var body: some View {
         // Looked up once here; the catalog and the installed list each run to thousands.
-        let installed = themeManager.installedThemesByFolder()
+        let installed = themeManager.installedCatalogThemes(catalog.byID)
         let updates = pendingUpdates(installed)
         VStack(spacing: 0) {
             if !catalog.themes.isEmpty {
@@ -529,6 +529,15 @@ private func reloadOverlays() {
     NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
 }
 
+// For views without an alert of their own.
+private func reportImageProblem(_ problem: String?) {
+    guard let problem else { return }
+    let alert = NSAlert()
+    alert.messageText = "Image Not Used"
+    alert.informativeText = problem
+    alert.runModal()
+}
+
 /// The frame toggles, shared by the Themes tab and the editor.
 struct FrameOptionToggles: View {
     @AppStorage("windowBorders") private var windowBorders = true
@@ -887,7 +896,7 @@ struct ButtonStateSlot: View {
                 isHovering = hovering
             }
             .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                loadDroppedFile(providers) { ThemeManager.shared.setDraftImage($0, forKey: userDefaultsKey) }
+                loadDroppedFile(providers) { reportImageProblem(ThemeManager.shared.setDraftImage($0, forKey: userDefaultsKey)) }
             }
             .onAppear(perform: refresh)
             // Applying or resetting a theme changes the live paths.
@@ -930,7 +939,7 @@ struct ButtonStateSlot: View {
         panel.message = "Select \(stateName.lowercased()) state image"
 
         if panel.runModal() == .OK, let url = panel.url {
-            ThemeManager.shared.setDraftImage(url, forKey: userDefaultsKey)
+            reportImageProblem(ThemeManager.shared.setDraftImage(url, forKey: userDefaultsKey))
         }
     }
 
