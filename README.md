@@ -7,9 +7,9 @@ Trois brings back the window themes of classic desktop customizers and keeps the
 **Features:**
 
 - **Themed buttons** replace close, minimize and zoom
-- **Window frames** draw each theme's chrome around your windows
+- **Window frames** from each theme around your windows
 - **One-click install** from the [theme gallery](https://trois-dev.github.io/trois-themes/)
-- **Editor tab** to build your own theme or mix parts from others
+- **Editor** to build your own theme or combine buttons and frames from others
 
 <p align="center">
   <img src="docs/screenshots/themes.png" width="49%" alt="Installed tab showing Kaleidoscope window frames">
