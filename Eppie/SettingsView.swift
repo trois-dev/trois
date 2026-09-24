@@ -33,7 +33,8 @@ struct SettingsView: View {
                 .tabItem { Label("About", systemImage: "info.circle") }
                 .tag(SettingsTab.about)
         }
-        .frame(width: 500, height: 400)
+        // Wide enough for three frame previews across.
+        .frame(width: 620, height: 480)
     }
 }
 
@@ -181,16 +182,23 @@ struct ThemePickerView: View {
     @State private var dragOver = false
     @State private var installError: String?
 
+    // With borders on, cards show each theme's frame around a small window.
+    private var showsFrames: Bool { windowBorders }
+    private var previewSize: CGSize {
+        showsFrames ? FramePreviewRenderer.canvas : CGSize(width: 120, height: 60)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Theme grid
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 16) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: previewSize.width))], spacing: 16) {
                     // Default (no theme)
                     ThemeCard(
                         name: "Default",
                         isSelected: themeManager.currentTheme == nil,
-                        preview: defaultPreview
+                        previewSize: previewSize,
+                        preview: showsFrames ? AnyView(plainWindow(defaultPreview)) : AnyView(defaultPreview)
                     ) {
                         themeManager.clearTheme()
                     }
@@ -200,7 +208,8 @@ struct ThemePickerView: View {
                             name: theme.name,
                             author: theme.author,
                             isSelected: themeManager.currentTheme?.id == theme.id,
-                            preview: themePreview(theme)
+                            previewSize: previewSize,
+                            preview: cardPreview(theme)
                         ) {
                             themeManager.applyTheme(theme)
                         }
@@ -308,6 +317,30 @@ struct ThemePickerView: View {
         return true
     }
 
+    private func cardPreview(_ theme: Theme) -> AnyView {
+        guard showsFrames else { return AnyView(themePreview(theme)) }
+        guard let directory = theme.frameDirectory else { return AnyView(plainWindow(themePreview(theme))) }
+        return AnyView(FramePreviewView(
+            directory: directory, title: theme.name, frameButtons: frameButtons,
+            buttons: themePreview(theme),
+            fallback: AnyView(plainWindow(themePreview(theme)))
+        ))
+    }
+
+    // A frameless window for themes without a frame, sized like the framed ones.
+    private func plainWindow<Buttons: View>(_ buttons: Buttons) -> some View {
+        RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
+            .fill(Color(nsColor: .windowBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
+                    .stroke(Color.gray.opacity(0.4), lineWidth: 0.5)
+            )
+            .overlay(alignment: .topLeading) {
+                buttons.padding(8)
+            }
+            .frame(width: previewSize.width - 24, height: previewSize.height - 24)
+    }
+
     // Sized and spaced like the macOS 27 buttons.
     private var defaultPreview: some View {
         HStack(spacing: 9) {
@@ -359,16 +392,23 @@ struct ThemeCard<Preview: View>: View {
     let name: String
     var author: String? = nil
     let isSelected: Bool
+    var previewSize = CGSize(width: 120, height: 60)
     let preview: Preview
     let action: () -> Void
+
+    // Large previews hold a whole window, so they sit on a desktop-like backdrop.
+    private var backdrop: Color {
+        previewSize.height > 60 ? Color.gray.opacity(0.18) : Color(nsColor: .windowBackgroundColor)
+    }
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 4) {
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color(nsColor: .windowBackgroundColor))
-                    .frame(height: 60)
+                    .fill(backdrop)
+                    .frame(width: previewSize.width, height: previewSize.height)
                     .overlay(preview)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(isSelected ? Color.accentColor : Color.gray.opacity(0.3), lineWidth: isSelected ? 2 : 1)
@@ -389,7 +429,7 @@ struct ThemeCard<Preview: View>: View {
             }
         }
         .buttonStyle(.plain)
-        .frame(width: 120)
+        .frame(width: previewSize.width)
     }
 }
 
@@ -456,8 +496,7 @@ struct ManualSettingsView: View {
 
             HStack {
                 Button("Reset All") {
-                    ThemeManager.shared.clearTheme()
-                    NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
+                    ThemeManager.shared.resetDraft()
                 }
 
                 Spacer()
@@ -470,6 +509,8 @@ struct ManualSettingsView: View {
             .padding(.vertical)
             .padding(.horizontal, 32)
         }
+        // Edits go to a draft copy of whatever is applied, frame included.
+        .onAppear { ThemeManager.shared.prepareDraft() }
         .alert("Theme Saved", isPresented: $showingSaveAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -591,9 +632,9 @@ struct ButtonStateSlot: View {
             .onHover { hovering in
                 isHovering = hovering
             }
-            .onAppear {
-                imagePath = UserDefaults.standard.string(forKey: userDefaultsKey) ?? ""
-            }
+            .onAppear(perform: refresh)
+            // Applying or resetting a theme changes the live paths.
+            .onReceive(NotificationCenter.default.publisher(for: .init("TroisReloadImages"))) { _ in refresh() }
             .contextMenu {
                 if !imagePath.isEmpty {
                     Button("Clear") {
@@ -621,16 +662,16 @@ struct ButtonStateSlot: View {
         panel.message = "Select \(stateName.lowercased()) state image"
 
         if panel.runModal() == .OK, let url = panel.url {
-            imagePath = url.path
-            UserDefaults.standard.set(imagePath, forKey: userDefaultsKey)
-            NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
+            ThemeManager.shared.setDraftImage(url, forKey: userDefaultsKey)
         }
     }
 
     private func clearImage() {
-        imagePath = ""
-        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
-        NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
+        ThemeManager.shared.setDraftImage(nil, forKey: userDefaultsKey)
+    }
+
+    private func refresh() {
+        imagePath = UserDefaults.standard.string(forKey: userDefaultsKey) ?? ""
     }
 
     // Normalize image size to pixel dimensions, ignoring DPI metadata
