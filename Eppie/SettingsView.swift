@@ -739,14 +739,12 @@ struct ThemeCard<Preview: View>: View {
     var previewSize = CGSize(width: 120, height: 60)
     // Status icon in the preview's top-right corner.
     var badge: AnyView? = nil
-    // What clicking does, shown on hover in the preview window right of its
-    // sidebar, or in the middle of the preview when it has none. Nil shows
-    // nothing, e.g. for the applied theme.
+    // What clicking does, shown on hover in the middle of the preview. Nil
+    // shows nothing, e.g. for the applied theme.
     var hoverLabel: String? = nil
     let preview: Preview
     let action: () -> Void
     @State private var hovering = false
-    @State private var actionInWindow = false
 
     // Large previews hold a whole window, so they sit on a desktop-like backdrop.
     private var backdrop: Color {
@@ -759,13 +757,9 @@ struct ThemeCard<Preview: View>: View {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(backdrop)
                     .frame(width: previewSize.width, height: previewSize.height)
-                    .overlay(
-                        preview
-                            .environment(\.cardAction, hovering ? hoverLabel : nil)
-                            .onPreferenceChange(CardActionInWindowKey.self) { actionInWindow = $0 }
-                    )
+                    .overlay(preview)
                     .overlay {
-                        if !actionInWindow, hovering, let hoverLabel {
+                        if hovering, let hoverLabel {
                             CardActionPill(label: hoverLabel)
                         }
                     }

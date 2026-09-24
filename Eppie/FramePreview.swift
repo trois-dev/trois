@@ -153,7 +153,7 @@ struct WindowCorners: View {
                 CGRect(x: window.width - r, y: window.height - r, width: r, height: r),
             ])
         }
-        WindowSurface(size: window.size, buttonRow: buttonRow, showsAction: false)
+        WindowSurface(size: window.size, buttonRow: buttonRow)
             .mask(squares)
             .offset(x: window.minX, y: window.minY)
     }
@@ -180,18 +180,6 @@ enum PreviewWindowLayout {
 
 }
 
-private struct CardActionKey: EnvironmentKey {
-    static let defaultValue: String? = nil
-}
-
-extension EnvironmentValues {
-    /// The hovered card's action label, which its preview window shows.
-    var cardAction: String? {
-        get { self[CardActionKey.self] }
-        set { self[CardActionKey.self] = newValue }
-    }
-}
-
 /// A card's action on hover. Only a label; the whole card is the button.
 struct CardActionPill: View {
     let label: String
@@ -206,15 +194,6 @@ struct CardActionPill: View {
             .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
             .fixedSize()
             .allowsHitTesting(false)
-    }
-}
-
-/// Whether a card's preview window shows the hover button. Windows without a
-/// sidebar are too small for it, and the card shows it over everything.
-struct CardActionInWindowKey: PreferenceKey {
-    static let defaultValue = false
-    static func reduce(value: inout Bool, nextValue: () -> Bool) {
-        value = value || nextValue()
     }
 }
 
@@ -233,13 +212,10 @@ extension View {
 }
 
 /// A preview window's own surface: its fill, a sidebar down the left when
-/// there's room, so the buttons sit where most Mac apps put them, and the
-/// hovered card's action centered right of the sidebar.
+/// there's room, so the buttons sit where most Mac apps put them.
 struct WindowSurface: View {
     let size: CGSize
     let buttonRow: CGFloat
-    var showsAction = true
-    @Environment(\.cardAction) private var action
 
     private static let sidebarColor = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -258,14 +234,8 @@ struct WindowSurface: View {
                     .fill(Self.sidebarColor)
                     .frame(width: sidebar.width, height: sidebar.height)
                     .offset(x: sidebar.minX, y: sidebar.minY)
-                if showsAction, let action {
-                    CardActionPill(label: action)
-                        .frame(width: size.width - sidebar.maxX, height: size.height)
-                        .offset(x: sidebar.maxX)
-                }
             }
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
-        .preference(key: CardActionInWindowKey.self, value: showsAction && sidebar != nil)
     }
 }
