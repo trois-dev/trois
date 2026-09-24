@@ -252,7 +252,6 @@ struct CatalogCard: View {
         ThemeCard(
             name: entry.name,
             author: entry.author,
-            engine: entry.engine,
             isSelected: isApplied,
             previewSize: previewSize,
             badge: AnyView(badge),
@@ -592,7 +591,6 @@ struct ThemePickerView: View {
                         ThemeCard(
                             name: theme.name,
                             author: theme.author,
-                            engine: theme.engine,
                             isSelected: themeManager.currentTheme?.id == theme.id,
                             previewSize: previewSize,
                             hoverLabel: themeManager.currentTheme?.id == theme.id ? nil : "Apply",
@@ -768,7 +766,6 @@ struct ThemePickerView: View {
 struct ThemeCard<Preview: View>: View {
     let name: String
     var author: String? = nil
-    var engine: String? = nil
     let isSelected: Bool
     var previewSize = CGSize(width: 120, height: 60)
     // Status icon in the preview's top-right corner.
@@ -819,12 +816,6 @@ struct ThemeCard<Preview: View>: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                }
-                if let engine = engine {
-                    Text(engineLabel(engine))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
                 }
             }
         }
