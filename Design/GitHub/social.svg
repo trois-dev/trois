@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" fill="#1D2731"/>
+  <g transform="translate(496 60) scale(0.28)">
+  <circle cx="277" cy="512" r="235" fill="#F46B66"/>
+  <circle cx="512" cy="512" r="235" fill="#F5C65B"/>
+  <circle cx="747" cy="512" r="235" fill="#56C998"/>
+  <path d="M394.5 308.484 A235 235 0 0 1 394.5 715.516 A235 235 0 0 1 394.5 308.484 Z" fill="#F18D55"/>
+  <path d="M629.5 308.484 A235 235 0 0 1 629.5 715.516 A235 235 0 0 1 629.5 308.484 Z" fill="#A8D879"/>
+</g>
+  <text x="640" y="440" text-anchor="middle" font-family="Helvetica Neue" font-weight="bold" font-size="104" fill="#F5F5F7">Trois</text>
+  <text x="640" y="515" text-anchor="middle" font-family="Helvetica Neue" font-size="40" fill="#A1A1A6">Classic window themes for the modern Mac</text>
+</svg>
