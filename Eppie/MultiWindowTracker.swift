@@ -45,9 +45,14 @@ class MultiWindowTracker {
     private var focusQueryInFlight = false
     // Bumped by stopTracking() so AX results and window lists from before it are dropped.
     private var generation = 0
+    private let buttonWatcher = ButtonWatcher()
+    private var windowPIDs: [CGWindowID: pid_t] = [:]
+    // Extra reads made because button offsets kept changing, per window.
+    private var followUpReads: [CGWindowID: Int] = [:]
 
     // Motion is considered over this long after the last move event.
     private static let settleDelay: TimeInterval = 0.1
+    private static let maxFollowUpReads = 3
     private static let rejectRetry: CFAbsoluteTime = 1.0
 
     init(allWindows: Bool) {
@@ -55,6 +60,10 @@ class MultiWindowTracker {
     }
 
     func startTracking() {
+        buttonWatcher.start()
+        buttonWatcher.buttonsChanged = { [weak self] wid in
+            self?.buttonsChanged(wid)
+        }
         WindowServerEvents.start()
         WindowServerEvents.handler = { [weak self] event, wid in
             self?.handle(event: event, wid: wid)
@@ -118,6 +127,7 @@ class MultiWindowTracker {
         for wid in Array(overlayManagers.keys) {
             removeWindow(wid)
         }
+        buttonWatcher.stop()
         rejected.removeAll()
 
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -216,6 +226,9 @@ class MultiWindowTracker {
             updateClipping()
         }
         manager.syncAppKitFrames()
+        // Buttons can move within a window without a resize, and not every app
+        // reports it, so re-read them once motion stops.
+        manager.refresh()
     }
 
     // Live resizes fire resized every frame; read AX once they pause.
@@ -231,10 +244,26 @@ class MultiWindowTracker {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private func didRefresh(_ wid: CGWindowID, read: WindowRead) {
+    private func didRefresh(_ wid: CGWindowID, read: WindowRead, changed: Bool) {
         guard let manager = overlayManagers[wid] else { return }
-        if case .timedOut = read {
+        switch read {
+        case .timedOut:
             scheduleRefresh(wid, after: Self.rejectRetry)
+        case .unusable:
+            buttonWatcher.unwatch(wid)
+        case .window(let snapshot):
+            if let pid = windowPIDs[wid] {
+                buttonWatcher.watch(wid, pid: pid, elements: snapshot.buttonElements)
+            }
+        }
+        // Buttons read mid-animation land somewhere in between. Read again
+        // until they hold still.
+        let followUps = followUpReads[wid] ?? 0
+        if changed && followUps < Self.maxFollowUpReads {
+            followUpReads[wid] = followUps + 1
+            scheduleRefresh(wid)
+        } else {
+            followUpReads[wid] = nil
         }
         // A drag may have started while AX was read.
         if draggingWindows.contains(wid) {
@@ -242,6 +271,13 @@ class MultiWindowTracker {
         }
         // A new button image or position needs its clip recomputed.
         updateClipping()
+    }
+
+    // The app replaced a window's buttons, e.g. Arc showing or hiding its sidebar.
+    private func buttonsChanged(_ wid: CGWindowID) {
+        guard overlayManagers[wid] != nil else { return }
+        followUpReads[wid] = nil
+        scheduleRefresh(wid)
     }
 
     // MARK: - Scan
@@ -364,6 +400,31 @@ class MultiWindowTracker {
         for (pid, windows) in lookups {
             lookUp(windows, of: pid)
         }
+        verifyActiveWindows()
+    }
+
+    // Some apps move their buttons without moving the window or posting any AX
+    // notification, e.g. Arc's sidebar sliding in on hover or Cmd-S. Checks the
+    // windows such changes come from: the one under the mouse and the frontmost
+    // app's front window.
+    private func verifyActiveWindows() {
+        var wids: [CGWindowID] = []
+        if let screen = NSScreen.screens.first {
+            let mouse = NSEvent.mouseLocation
+            let point = CGPoint(x: mouse.x, y: screen.frame.height - mouse.y)
+            if let wid = stack.first(where: { frames[$0]?.contains(point) ?? false }) {
+                wids.append(wid)
+            }
+        }
+        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+           let wid = stack.first(where: { windowPIDs[$0] == pid }), !wids.contains(wid) {
+            wids.append(wid)
+        }
+        for wid in wids {
+            guard let manager = overlayManagers[wid],
+                  settleWork[wid] == nil, refreshWork[wid] == nil else { continue }
+            manager.verify()
+        }
     }
 
     // Finds and reads the AX windows for newly seen windows of one app.
@@ -378,12 +439,12 @@ class MultiWindowTracker {
                 return (window.wid, OverlayManager.read(axWindow))
             }
             DispatchQueue.main.async {
-                self?.didLookUp(reads, generation: generation)
+                self?.didLookUp(reads, pid: pid, generation: generation)
             }
         }
     }
 
-    private func didLookUp(_ reads: [(wid: CGWindowID, read: WindowRead)], generation: Int) {
+    private func didLookUp(_ reads: [(wid: CGWindowID, read: WindowRead)], pid: pid_t, generation: Int) {
         guard generation == self.generation else { return }
         let now = CFAbsoluteTimeGetCurrent()
         for (wid, read) in reads {
@@ -396,11 +457,15 @@ class MultiWindowTracker {
                 rejected[wid] = now
                 continue
             }
-            manager.didRefresh = { [weak self] read in
-                self?.didRefresh(wid, read: read)
+            manager.didRefresh = { [weak self] read, changed in
+                self?.didRefresh(wid, read: read, changed: changed)
             }
             rejected[wid] = nil
             overlayManagers[wid] = manager
+            windowPIDs[wid] = pid
+            if case .window(let snapshot) = read {
+                buttonWatcher.watch(wid, pid: pid, elements: snapshot.buttonElements)
+            }
         }
         updateSubscription()
         updateClipping()
@@ -425,6 +490,9 @@ class MultiWindowTracker {
         refreshWork[wid]?.cancel()
         refreshWork[wid] = nil
         draggingWindows.remove(wid)
+        buttonWatcher.unwatch(wid)
+        windowPIDs[wid] = nil
+        followUpReads[wid] = nil
     }
 
     private func updateSubscription() {
@@ -527,5 +595,82 @@ class MultiWindowTracker {
         for (_, manager) in overlayManagers {
             manager.reloadImages()
         }
+    }
+}
+
+// Watches tracked windows' button elements for AXUIElementDestroyed. Some apps
+// rebuild their buttons without moving or resizing the window, which fires no
+// window-server event. Arc does it when its sidebar is shown or hidden.
+final class ButtonWatcher {
+    // Called on main with the window whose buttons went away.
+    var buttonsChanged: ((CGWindowID) -> Void)?
+    private var observers: [pid_t: AXObserver] = [:]
+    private var watched: [CGWindowID: (pid: pid_t, elements: [AXUIElement])] = [:]
+
+    // AX callbacks can't capture, so they reach the live watcher through here.
+    private static weak var current: ButtonWatcher?
+
+    // The refcon carries the window id rather than a pointer, so a callback
+    // arriving after unwatch() finds nothing to free and at worst triggers a
+    // spare refresh.
+    private static let callback: AXObserverCallback = { _, _, _, refcon in
+        let wid = CGWindowID(UInt(bitPattern: refcon))
+        ButtonWatcher.current?.buttonsChanged?(wid)
+    }
+
+    func start() {
+        Self.current = self
+    }
+
+    func stop() {
+        for wid in Array(watched.keys) {
+            unwatch(wid)
+        }
+        if Self.current === self {
+            Self.current = nil
+        }
+    }
+
+    /// Watches `elements` in place of whatever was watched for `wid`.
+    func watch(_ wid: CGWindowID, pid: pid_t, elements: [AXUIElement]) {
+        if let old = watched[wid], old.elements.count == elements.count,
+           zip(old.elements, elements).allSatisfy({ CFEqual($0, $1) }) {
+            return
+        }
+        unwatch(wid)
+        guard !elements.isEmpty, let observer = observer(for: pid) else { return }
+        watched[wid] = (pid, elements)
+        let refcon = UnsafeMutableRawPointer(bitPattern: UInt(wid))
+        // Adding a notification messages the app, so it can block.
+        AXQueue.async {
+            for element in elements {
+                AXObserverAddNotification(observer, element, kAXUIElementDestroyedNotification as CFString, refcon)
+            }
+        }
+    }
+
+    func unwatch(_ wid: CGWindowID) {
+        guard let entry = watched.removeValue(forKey: wid) else { return }
+        guard let observer = observers[entry.pid] else { return }
+        AXQueue.async {
+            for element in entry.elements {
+                AXObserverRemoveNotification(observer, element, kAXUIElementDestroyedNotification as CFString)
+            }
+        }
+        if !watched.values.contains(where: { $0.pid == entry.pid }) {
+            observers[entry.pid] = nil
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        }
+    }
+
+    private func observer(for pid: pid_t) -> AXObserver? {
+        if let observer = observers[pid] {
+            return observer
+        }
+        var observer: AXObserver?
+        guard AXObserverCreate(pid, Self.callback, &observer) == .success, let observer else { return nil }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        observers[pid] = observer
+        return observer
     }
 }

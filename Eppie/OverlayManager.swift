@@ -23,16 +23,22 @@ enum AXQueue {
 struct WindowSnapshot {
     let window: AXUIElement
     let frame: CGRect
+    // Nil for buttons that are missing or outside the window. Arc parks its
+    // buttons left of the window while its sidebar is hidden.
     let buttons: ButtonFrames
     let closeButton: AXUIElement?
     let minimizeButton: AXUIElement?
     let zoomButton: AXUIElement?
     let isFullScreen: Bool
+
+    var buttonElements: [AXUIElement] {
+        [closeButton, minimizeButton, zoomButton].compactMap { $0 }
+    }
 }
 
 enum WindowRead {
     case window(WindowSnapshot)
-    // No frame or no buttons.
+    // No frame or no button elements.
     case unusable(frame: CGRect?)
     // The app didn't answer in time. Whatever was shown before still stands.
     case timedOut
@@ -51,9 +57,13 @@ class OverlayManager {
     private var offsets = ButtonFrames()
     private(set) var isRefreshing = false
     private var refreshAgain = false
+    private var isVerifying = false
     private var removed = false
-    // Called on main after each refresh() is applied.
-    var didRefresh: ((WindowRead) -> Void)?
+    // A press that hit a stale button element, retried after the next read.
+    private var pendingPress: TrafficLightType?
+    // Called on main after each refresh() is applied, with whether the button
+    // offsets changed.
+    var didRefresh: ((WindowRead, Bool) -> Void)?
 
     init(targetWID: CGWindowID) {
         self.targetWID = targetWID
@@ -66,14 +76,18 @@ class OverlayManager {
             let close = try button(of: window, kAXCloseButtonAttribute)
             let minimize = try button(of: window, kAXMinimizeButtonAttribute)
             let zoom = try button(of: window, kAXZoomButtonAttribute)
-            let buttons = ButtonFrames(
-                close: try close.flatMap { try axFrame(of: $0) },
-                minimize: try minimize.flatMap { try axFrame(of: $0) },
-                zoom: try zoom.flatMap { try axFrame(of: $0) }
-            )
-            guard buttons.close != nil || buttons.minimize != nil || buttons.zoom != nil else {
+            guard close != nil || minimize != nil || zoom != nil else {
                 return .unusable(frame: frame)
             }
+            func visibleFrame(of button: AXUIElement?) throws -> CGRect? {
+                guard let button, let buttonFrame = try axFrame(of: button) else { return nil }
+                return frame.contains(CGPoint(x: buttonFrame.midX, y: buttonFrame.midY)) ? buttonFrame : nil
+            }
+            let buttons = ButtonFrames(
+                close: try visibleFrame(of: close),
+                minimize: try visibleFrame(of: minimize),
+                zoom: try visibleFrame(of: zoom)
+            )
             let fullScreen = try value(of: window, "AXFullScreen") as? Bool ?? false
             return .window(WindowSnapshot(
                 window: window, frame: frame, buttons: buttons,
@@ -85,8 +99,8 @@ class OverlayManager {
         }
     }
 
-    /// Places the overlays from a read. Returns false when there is nothing to
-    /// show; unusable windows also get their overlays hidden.
+    /// Places the overlays from a read. Returns false when the window has no
+    /// buttons, which also takes its overlays off screen.
     @discardableResult
     func apply(_ read: WindowRead) -> Bool {
         switch read {
@@ -96,7 +110,11 @@ class OverlayManager {
             if let frame {
                 targetFrame = frame
             }
-            hideOverlays()
+            offsets = ButtonFrames()
+            // Ordered out rather than faded, so showOverlays() can't bring them back.
+            closeOverlay?.orderOut(nil)
+            minimizeOverlay?.orderOut(nil)
+            zoomOverlay?.orderOut(nil)
             return false
         case .window(let snapshot):
             // The window may have moved while AX was read. Offsets hold either
@@ -129,11 +147,15 @@ class OverlayManager {
             DispatchQueue.main.async {
                 guard let self, !self.removed else { return }
                 self.isRefreshing = false
+                let oldOffsets = self.offsets
                 self.apply(read)
-                self.didRefresh?(read)
+                self.didRefresh?(read, self.offsets != oldOffsets)
                 if self.refreshAgain {
                     self.refreshAgain = false
                     self.refresh()
+                } else if let type = self.pendingPress {
+                    self.pendingPress = nil
+                    self.overlay(for: type)?.press(retry: false)
                 }
             }
         }
@@ -169,6 +191,59 @@ class OverlayManager {
         closeOverlay?.syncAppKitFrame()
         minimizeOverlay?.syncAppKitFrame()
         zoomOverlay?.syncAppKitFrame()
+    }
+
+    /// Reads only the close button and refreshes if it isn't where the overlays
+    /// assume. About half the cost of a full read, for frequent checks.
+    func verify() {
+        guard let window = currentWindow, !removed, !isRefreshing, !isVerifying else { return }
+        isVerifying = true
+        AXQueue.async { [weak self] in
+            // Outer nil when the app didn't answer in time.
+            let closeFrame: CGRect??
+            do {
+                closeFrame = .some(try Self.button(of: window, kAXCloseButtonAttribute).flatMap { try Self.axFrame(of: $0) })
+            } catch {
+                closeFrame = nil
+            }
+            DispatchQueue.main.async {
+                guard let self, !self.removed else { return }
+                self.isVerifying = false
+                guard let closeFrame, !self.isRefreshing else { return }
+                if !self.closeButtonMatches(closeFrame) {
+                    self.refresh()
+                }
+            }
+        }
+    }
+
+    private func closeButtonMatches(_ closeFrame: CGRect?) -> Bool {
+        guard let offset = offsets.close else {
+            // Not shown: fine while it stays missing or outside the window.
+            guard let closeFrame else { return true }
+            return !targetFrame.contains(CGPoint(x: closeFrame.midX, y: closeFrame.midY))
+        }
+        guard let closeFrame else { return false }
+        return abs(closeFrame.minX - (targetFrame.minX + offset.minX)) < 1 &&
+            abs(closeFrame.minY - (targetFrame.minY + offset.minY)) < 1
+    }
+
+    private func overlay(for type: TrafficLightType) -> OverlayWindow? {
+        switch type {
+        case .close: return closeOverlay
+        case .minimize: return minimizeOverlay
+        case .zoom: return zoomOverlay
+        }
+    }
+
+    private func makeOverlay(_ type: TrafficLightType) -> OverlayWindow {
+        let overlay = OverlayWindow(buttonType: type)
+        overlay.pressFailed = { [weak self] in
+            guard let self else { return }
+            self.pendingPress = type
+            self.refresh()
+        }
+        return overlay
     }
 
     private func overlaysWithOffsets() -> [(OverlayWindow, CGRect)] {
@@ -210,7 +285,7 @@ class OverlayManager {
 
         if let offset = offsets.close {
             if closeOverlay == nil {
-                closeOverlay = OverlayWindow(buttonType: .close)
+                closeOverlay = makeOverlay(.close)
             }
             closeOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
             closeOverlay?.targetButton = snapshot.closeButton
@@ -221,7 +296,7 @@ class OverlayManager {
 
         if let offset = offsets.minimize {
             if minimizeOverlay == nil {
-                minimizeOverlay = OverlayWindow(buttonType: .minimize)
+                minimizeOverlay = makeOverlay(.minimize)
             }
             minimizeOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
             minimizeOverlay?.targetButton = snapshot.minimizeButton
@@ -232,7 +307,7 @@ class OverlayManager {
 
         if let offset = offsets.zoom {
             if zoomOverlay == nil {
-                zoomOverlay = OverlayWindow(buttonType: .zoom)
+                zoomOverlay = makeOverlay(.zoom)
             }
             zoomOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
             zoomOverlay?.targetButton = snapshot.zoomButton
@@ -303,6 +378,9 @@ enum TrafficLightType {
 class OverlayWindow: NSWindow {
     let buttonType: TrafficLightType
     var targetButton: AXUIElement?
+    // Called on main when a press found targetButton gone, e.g. after Arc
+    // rebuilt its buttons.
+    var pressFailed: (() -> Void)?
     private var imageView: NSImageView!
     private var trackingArea: NSTrackingArea?
     private var isMouseDown = false
@@ -332,6 +410,8 @@ class OverlayWindow: NSWindow {
         self.level = .floating
         // Owned by OverlayManager. close() must not also release it.
         self.isReleasedWhenClosed = false
+        // orderOut otherwise fades for about 250ms, trailing buttons that vanish at once.
+        self.animationBehavior = .none
         self.backgroundColor = .clear
         self.isOpaque = false
         self.hasShadow = false
@@ -612,7 +692,7 @@ class OverlayWindow: NSWindow {
     override func mouseUp(with event: NSEvent) {
         // Only perform action if mouse is still inside
         if isMouseDown && isMouseInside {
-            performButtonAction()
+            press(retry: true)
         }
         isMouseDown = false
         // Restore appropriate image
@@ -640,10 +720,14 @@ class OverlayWindow: NSWindow {
         }
     }
 
-    private func performButtonAction() {
+    func press(retry: Bool) {
         guard let button = targetButton else { return }
-        AXQueue.async {
-            AXUIElementPerformAction(button, kAXPressAction as CFString)
+        AXQueue.async { [weak self] in
+            let error = AXUIElementPerformAction(button, kAXPressAction as CFString)
+            guard retry, error == .invalidUIElement else { return }
+            DispatchQueue.main.async {
+                self?.pressFailed?()
+            }
         }
     }
 
