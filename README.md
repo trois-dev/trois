@@ -1,3 +1,5 @@
+<img src="Design/Icon/TroisIcon.svg" width="96" alt="Trois logo">
+
 # Trois
 
 Trois brings back the window themes of classic desktop customizers and keeps them working on a modern Mac. Themes from any engine are converted to one format, so new sources can be added without touching the app.
@@ -8,6 +10,11 @@ Trois brings back the window themes of classic desktop customizers and keeps the
 - **Window frames** draw each theme's chrome around your windows
 - **One-click install** from the [theme gallery](https://trois-dev.github.io/trois-themes/)
 - **Custom tab** to build your own theme or mix parts from others
+
+<p align="center">
+  <img src="docs/screenshots/themes.png" width="49%" alt="Themes tab showing Kaleidoscope window frames">
+  <img src="docs/screenshots/custom.png" width="49%" alt="Custom tab editing a theme in a live preview">
+</p>
 
 Made by [sryo](https://github.com/sryo). Not affiliated with the original tools or their authors. See [Credits](#credits).
 
