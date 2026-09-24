@@ -532,13 +532,13 @@ struct AboutView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("by sryo")
                     .font(.caption)
-                Text("Successor to EppieDesktop for Windows")
+                Text("An homage to EppieDesktop for Windows")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text("Original by Jeff Epstein (1998-1999)")
+                Text("EppieDesktop by Jeff Epstein (1998-1999)")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text("Theme gallery from VirtualPlastic.net")
+                Text("Themes by their authors, via VirtualPlastic.net")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

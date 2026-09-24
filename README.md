@@ -2,7 +2,7 @@
 
 A macOS menu bar app that replaces window traffic light buttons (close, minimize, zoom) with custom themed images.
 
-Compatible with Eppie themes.
+An homage to EppieDesktop by Jeff Epstein. Compatible with EppieDesktop themes. Not affiliated with the original author.
 
 ## Modes
 
