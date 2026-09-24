@@ -11,6 +11,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var appLaunchObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Buttons on every window unless the user turned it off.
+        UserDefaults.standard.register(defaults: ["allWindowsMode": true])
+
         // Run as menu bar app (no dock icon)
         NSApp.setActivationPolicy(.accessory)
 
