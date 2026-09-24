@@ -88,6 +88,7 @@ struct FramePreviewView<Buttons: View>: View {
     let fallback: AnyView
     // Tagged with its key, so a stale preview isn't shown after a setting changes.
     @State private var rendered: (key: String, preview: FramePreviewImage?)?
+    @State private var buttonRow = PreviewWindowLayout.defaultButtonRow
 
     private var key: String {
         FramePreviewRenderer.key(directory: directory, title: title, frameButtons: frameButtons)
@@ -118,14 +119,16 @@ struct FramePreviewView<Buttons: View>: View {
 
     private func framed(_ preview: FramePreviewImage) -> some View {
         ZStack(alignment: .topLeading) {
-            WindowSurface(size: preview.window.size)
+            WindowSurface(size: preview.window.size, buttonRow: buttonRow)
                 .offset(x: preview.window.minX, y: preview.window.minY)
             Image(decorative: preview.image, scale: 2)
                 .interpolation(.none)
-            WindowCorners(window: preview.window)
+            WindowCorners(window: preview.window, buttonRow: buttonRow)
             buttons
+                .reportsButtonRowWidth()
                 .offset(x: preview.window.minX + 8, y: preview.window.minY + 8)
         }
+        .onPreferenceChange(ButtonRowWidthKey.self) { buttonRow = $0 }
         .frame(width: preview.size.width, height: preview.size.height, alignment: .topLeading)
     }
 }
@@ -138,6 +141,7 @@ struct FramePreviewView<Buttons: View>: View {
 struct WindowCorners: View {
     // Points, top-left origin, in the frame image's space.
     let window: CGRect
+    let buttonRow: CGFloat
 
     var body: some View {
         let r = min(FramePreviewRenderer.cornerRadius, window.width / 2, window.height / 2)
@@ -149,46 +153,119 @@ struct WindowCorners: View {
                 CGRect(x: window.width - r, y: window.height - r, width: r, height: r),
             ])
         }
-        WindowSurface(size: window.size)
+        WindowSurface(size: window.size, buttonRow: buttonRow, showsAction: false)
             .mask(squares)
             .offset(x: window.minX, y: window.minY)
     }
 }
 
-/// A preview window's own surface: its fill and, when there's room, a sidebar
-/// down the left, so the buttons sit where most Mac apps put them.
+/// Where the sidebar and the hover button go in a preview window. Kept in
+/// step with sidebar_width in the catalog's scripts/build.py.
+enum PreviewWindowLayout {
+    static let inset: CGFloat = 4
+    // Room the hover button keeps beside the sidebar.
+    private static let minimumContentWidth: CGFloat = 72
+    // Until a card's buttons are measured.
+    static let defaultButtonRow: CGFloat = 50
+
+    /// The sidebar in window coordinates: inset on three sides, 40% of the
+    /// window wide within 60 to 72 points, and wider when the buttons, which
+    /// start 8 points in, need it. Nil when the window can't keep room for
+    /// the hover button beside it.
+    static func sidebar(in size: CGSize, buttonRow: CGFloat) -> CGRect? {
+        let width = max(min(72, max(60, (size.width * 0.4).rounded())), buttonRow + inset * 2)
+        guard size.width - inset - width >= minimumContentWidth else { return nil }
+        return CGRect(x: inset, y: inset, width: width, height: size.height - inset * 2)
+    }
+
+}
+
+private struct CardActionKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+extension EnvironmentValues {
+    /// The hovered card's action label, which its preview window shows.
+    var cardAction: String? {
+        get { self[CardActionKey.self] }
+        set { self[CardActionKey.self] = newValue }
+    }
+}
+
+/// A card's action on hover. Only a label; the whole card is the button.
+struct CardActionPill: View {
+    let label: String
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.accentColor))
+            .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
+            .fixedSize()
+            .allowsHitTesting(false)
+    }
+}
+
+/// Whether a card's preview window shows the hover button. Windows without a
+/// sidebar are too small for it, and the card shows it over everything.
+struct CardActionInWindowKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
+/// Measures a card's button row, for sizing the sidebar around it.
+struct ButtonRowWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = PreviewWindowLayout.defaultButtonRow
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+extension View {
+    func reportsButtonRowWidth() -> some View {
+        background(GeometryReader { Color.clear.preference(key: ButtonRowWidthKey.self, value: $0.size.width) })
+    }
+}
+
+/// A preview window's own surface: its fill, a sidebar down the left when
+/// there's room, so the buttons sit where most Mac apps put them, and the
+/// hovered card's action centered right of the sidebar.
 struct WindowSurface: View {
     let size: CGSize
+    let buttonRow: CGFloat
+    var showsAction = true
+    @Environment(\.cardAction) private var action
 
-    // Kept in step with .sidebar in the catalog's scripts/build.py.
-    private static let inset: CGFloat = 4
-    private static let minimumWindowWidth: CGFloat = 110
     private static let sidebarColor = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             ? NSColor.black.withAlphaComponent(0.2)
             : NSColor.black.withAlphaComponent(0.06)
     })
 
-    /// The sidebar in window coordinates: inset on three sides, 40% of the
-    /// window wide within 60 to 72 points. Nil in windows too narrow for one.
-    static func sidebar(in size: CGSize) -> CGRect? {
-        guard size.width >= minimumWindowWidth else { return nil }
-        let width = min(72, max(60, (size.width * 0.4).rounded()))
-        return CGRect(x: inset, y: inset, width: width, height: size.height - inset * 2)
-    }
-
     var body: some View {
+        let sidebar = PreviewWindowLayout.sidebar(in: size, buttonRow: buttonRow)
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
                 .fill(Color(nsColor: .windowBackgroundColor))
-            if let sidebar = Self.sidebar(in: size) {
+            if let sidebar {
                 // Concentric with the window's corners.
-                RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius - Self.inset)
+                RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius - PreviewWindowLayout.inset)
                     .fill(Self.sidebarColor)
                     .frame(width: sidebar.width, height: sidebar.height)
                     .offset(x: sidebar.minX, y: sidebar.minY)
+                if showsAction, let action {
+                    CardActionPill(label: action)
+                        .frame(width: size.width - sidebar.maxX, height: size.height)
+                        .offset(x: sidebar.maxX)
+                }
             }
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .preference(key: CardActionInWindowKey.self, value: showsAction && sidebar != nil)
     }
 }

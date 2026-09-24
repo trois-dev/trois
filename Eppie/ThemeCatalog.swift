@@ -203,6 +203,8 @@ struct CatalogTheme: Decodable, Identifiable, Hashable {
     let preview: [String: String]
     // Absent for themes without a frame and from older indexes.
     let frame: CatalogFrame?
+    // Width in points of the button row the previews draw. Absent from older indexes.
+    let buttonRow: CGFloat?
 }
 
 /// A theme's frame drawn around a small window, buttons included, as the

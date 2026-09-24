@@ -335,7 +335,9 @@ struct CatalogCard: View {
     private var preview: AnyView {
         guard showsWindow else { return AnyView(buttons) }
         guard let frame = entry.frame, let url = catalog.url(for: frame.image) else { return plainWindow }
-        return AnyView(CatalogFramePreview(frame: frame, url: url, title: entry.name, fallback: plainWindow))
+        return AnyView(CatalogFramePreview(frame: frame, url: url, title: entry.name,
+                                           buttonRow: entry.buttonRow ?? PreviewWindowLayout.defaultButtonRow,
+                                           fallback: plainWindow))
     }
 }
 
@@ -398,6 +400,8 @@ struct CatalogFramePreview: View {
     let frame: CatalogFrame
     let url: URL
     let title: String
+    // Drawn into the frame image, so measured by the catalog.
+    let buttonRow: CGFloat
     // Shown when the index's geometry is unusable or the image won't load.
     let fallback: AnyView
     @State private var image: NSImage?
@@ -423,14 +427,14 @@ struct CatalogFramePreview: View {
 
     private func framed(size: CGSize, window: CGRect, image: NSImage?) -> some View {
         ZStack(alignment: .topLeading) {
-            WindowSurface(size: window.size)
+            WindowSurface(size: window.size, buttonRow: buttonRow)
                 .offset(x: window.minX, y: window.minY)
             if let image {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.none)
                     .frame(width: size.width, height: size.height)
-                WindowCorners(window: window)
+                WindowCorners(window: window, buttonRow: buttonRow)
                 if let box = frame.titleRect, let style = frame.title {
                     titleText(style)
                         .frame(width: box.width, height: box.height)
@@ -477,17 +481,19 @@ private extension Color {
 struct PlainWindowPreview<Buttons: View>: View {
     let previewSize: CGSize
     let buttons: Buttons
+    @State private var buttonRow = PreviewWindowLayout.defaultButtonRow
 
     var body: some View {
         let size = CGSize(width: previewSize.width - 24, height: previewSize.height - 24)
-        WindowSurface(size: size)
+        WindowSurface(size: size, buttonRow: buttonRow)
             .overlay(
                 RoundedRectangle(cornerRadius: FramePreviewRenderer.cornerRadius)
                     .stroke(Color.gray.opacity(0.4), lineWidth: 0.5)
             )
             .overlay(alignment: .topLeading) {
-                buttons.padding(8)
+                buttons.reportsButtonRowWidth().padding(8)
             }
+            .onPreferenceChange(ButtonRowWidthKey.self) { buttonRow = $0 }
     }
 }
 
@@ -715,12 +721,14 @@ struct ThemeCard<Preview: View>: View {
     var previewSize = CGSize(width: 120, height: 60)
     // Status icon in the preview's top-right corner.
     var badge: AnyView? = nil
-    // What clicking does, shown in the middle of the preview on hover. Nil
-    // shows nothing, e.g. for the applied theme.
+    // What clicking does, shown on hover in the preview window right of its
+    // sidebar, or in the middle of the preview when it has none. Nil shows
+    // nothing, e.g. for the applied theme.
     var hoverLabel: String? = nil
     let preview: Preview
     let action: () -> Void
     @State private var hovering = false
+    @State private var actionInWindow = false
 
     // Large previews hold a whole window, so they sit on a desktop-like backdrop.
     private var backdrop: Color {
@@ -733,10 +741,14 @@ struct ThemeCard<Preview: View>: View {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(backdrop)
                     .frame(width: previewSize.width, height: previewSize.height)
-                    .overlay(preview)
+                    .overlay(
+                        preview
+                            .environment(\.cardAction, hovering ? hoverLabel : nil)
+                            .onPreferenceChange(CardActionInWindowKey.self) { actionInWindow = $0 }
+                    )
                     .overlay {
-                        if hovering, let hoverLabel {
-                            hoverButton(hoverLabel)
+                        if !actionInWindow, hovering, let hoverLabel {
+                            CardActionPill(label: hoverLabel)
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -778,21 +790,6 @@ struct ThemeCard<Preview: View>: View {
     // Matches the website's cards: 3 points of accent when applied or hovered.
     private var outlined: Bool {
         isSelected || hovering
-    }
-
-    // Only a label; the whole card is the button.
-    private func hoverButton(_ label: String) -> some View {
-        ZStack {
-            Color.black.opacity(0.15)
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(Color.accentColor))
-                .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
-        }
-        .allowsHitTesting(false)
     }
 }
 
