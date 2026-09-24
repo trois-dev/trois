@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Themes
+    url: https://github.com/trois-dev/trois-themes/issues
+    about: Theme requests, broken themes, credits and takedowns go in the themes repo.

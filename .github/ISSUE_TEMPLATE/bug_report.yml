@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in Trois doesn't work
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw and what you expected instead. Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Click ...
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Overlay
+        - Injection
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: e.g. macOS 26.1
+    validations:
+      required: true
+  - type: input
+    id: trois
+    attributes:
+      label: Trois version
+  - type: input
+    id: apps
+    attributes:
+      label: Affected apps and theme
+      placeholder: e.g. Safari, Finder with the "platinum" theme
