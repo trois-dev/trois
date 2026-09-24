@@ -310,6 +310,10 @@ class OverlayWindow: NSWindow {
     private var imageSize: NSSize = NSSize(width: 14, height: 14)
     private var buttonCenter: CGPoint = .zero
     private var windowIsZoomed = false
+    // Diameter of the system button's circle, which images must cover. The
+    // system draws it 1pt inside the AX button frame: 14pt in a 16pt frame on
+    // macOS 27, 12pt before.
+    private var coverSize: CGFloat = 14
     // Set after a window-server move AppKit didn't see. AppKit's cached frame
     // keeps the old origin until syncAppKitFrame().
     private var appKitStale = false
@@ -378,13 +382,17 @@ class OverlayWindow: NSWindow {
         if windowIsZoomed != zoomed {
             windowIsZoomed = zoomed
             // Reload image to show restore/maximize appropriately
-            if isMouseDown {
-                loadPressedImage()
-            } else if isMouseInside {
-                loadHoverImage()
-            } else {
-                loadCustomImage()
-            }
+            reloadImageForMouseState()
+        }
+    }
+
+    private func reloadImageForMouseState() {
+        if isMouseDown {
+            loadPressedImage()
+        } else if isMouseInside {
+            loadHoverImage()
+        } else {
+            loadCustomImage()
         }
     }
 
@@ -402,9 +410,10 @@ class OverlayWindow: NSWindow {
         let key = baseKey + state + "Image"
 
         if let path = defaults.string(forKey: key),
-           let image = NSImage(contentsOfFile: path) {
+           let file = NSImage(contentsOfFile: path) {
             // Normalize image size to pixel dimensions (ignore DPI)
-            normalizeImageSize(image)
+            normalizeImageSize(file)
+            let image = coveringSystemButton(file)
             imageView.image = image
             // Update size based on image if this is the normal state
             if state.isEmpty {
@@ -415,8 +424,9 @@ class OverlayWindow: NSWindow {
             if windowIsZoomed {
                 let fallbackKey = "zoomButton" + state + "Image"
                 if let path = defaults.string(forKey: fallbackKey),
-                   let image = NSImage(contentsOfFile: path) {
-                    normalizeImageSize(image)
+                   let file = NSImage(contentsOfFile: path) {
+                    normalizeImageSize(file)
+                    let image = coveringSystemButton(file)
                     imageView.image = image
                     updateImageSize(image.size)
                     return
@@ -441,18 +451,27 @@ class OverlayWindow: NSWindow {
         }
     }
 
-    private func updateImageSize(_ size: NSSize) {
-        // Use pixel dimensions from image representation if available
-        var pixelSize = size
-        if let image = imageView.image,
-           let rep = image.representations.first {
-            pixelSize = NSSize(width: rep.pixelsWide, height: rep.pixelsHigh)
+    /// Scales an image smaller than the system button's circle up until it covers
+    /// it, keeping the aspect ratio. Nearest neighbor keeps pixel art sharp.
+    private func coveringSystemButton(_ image: NSImage) -> NSImage {
+        let size = image.size
+        guard size.width > 0, size.height > 0,
+              size.width < coverSize || size.height < coverSize else { return image }
+        let scale = max(coverSize / size.width, coverSize / size.height)
+        let target = NSSize(width: ceil(size.width * scale), height: ceil(size.height * scale))
+        return NSImage(size: target, flipped: false) { rect in
+            NSGraphicsContext.current?.imageInterpolation = .none
+            image.draw(in: rect)
+            return true
         }
+    }
 
-        imageSize = pixelSize
-        imageView.frame = NSRect(origin: .zero, size: pixelSize)
+    // File images arrive with size already set to their pixel dimensions.
+    private func updateImageSize(_ size: NSSize) {
+        imageSize = size
+        imageView.frame = NSRect(origin: .zero, size: size)
         clipRects = nil
-        setContentSize(pixelSize)
+        setContentSize(size)
         // Re-center on button position
         repositionOnCenter()
     }
@@ -481,8 +500,9 @@ class OverlayWindow: NSWindow {
         )
     }
 
+    // A circle the size of the system one, with the same 1pt margin.
     private func createDefaultImage() -> NSImage {
-        let size = NSSize(width: 14, height: 14)
+        let size = NSSize(width: coverSize + 2, height: coverSize + 2)
         let image = NSImage(size: size)
         image.lockFocus()
 
@@ -494,7 +514,7 @@ class OverlayWindow: NSWindow {
         }
 
         color.setFill()
-        let path = NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: 12, height: 12))
+        let path = NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: coverSize, height: coverSize))
         path.fill()
 
         image.unlockFocus()
@@ -507,6 +527,13 @@ class OverlayWindow: NSWindow {
             x: frame.origin.x + frame.size.width / 2,
             y: frame.origin.y + frame.size.height / 2
         )
+
+        // Rescale images if this window's buttons are a different size
+        let size = min(frame.width, frame.height) - 2
+        if size > 0 && size != coverSize {
+            coverSize = size
+            reloadImageForMouseState()
+        }
 
         // Convert to Cocoa coordinates and position window centered on button
         let cocoaPoint = convertAXToCocoaCoordinates(buttonCenter)

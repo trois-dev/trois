@@ -121,11 +121,12 @@ struct ThemePickerView: View {
         return true
     }
 
+    // Sized and spaced like the macOS 27 buttons.
     private var defaultPreview: some View {
-        HStack(spacing: 4) {
-            Circle().fill(Color.red).frame(width: 12, height: 12)
-            Circle().fill(Color.yellow).frame(width: 12, height: 12)
-            Circle().fill(Color.green).frame(width: 12, height: 12)
+        HStack(spacing: 9) {
+            Circle().fill(Color.red).frame(width: 14, height: 14)
+            Circle().fill(Color.yellow).frame(width: 14, height: 14)
+            Circle().fill(Color.green).frame(width: 14, height: 14)
         }
     }
 
@@ -135,21 +136,21 @@ struct ThemePickerView: View {
                 Image(nsImage: normalizedImage(image))
                     .interpolation(.none)
             } else {
-                Circle().fill(Color.red).frame(width: 12, height: 12)
+                Circle().fill(Color.red).frame(width: 14, height: 14)
             }
 
             if let minURL = theme.minimizeUp, let image = NSImage(contentsOf: minURL) {
                 Image(nsImage: normalizedImage(image))
                     .interpolation(.none)
             } else {
-                Circle().fill(Color.yellow).frame(width: 12, height: 12)
+                Circle().fill(Color.yellow).frame(width: 14, height: 14)
             }
 
             if let maxURL = theme.maximizeUp, let image = NSImage(contentsOf: maxURL) {
                 Image(nsImage: normalizedImage(image))
                     .interpolation(.none)
             } else {
-                Circle().fill(Color.green).frame(width: 12, height: 12)
+                Circle().fill(Color.green).frame(width: 14, height: 14)
             }
         }
     }
