@@ -128,6 +128,12 @@ struct CatalogCard: View {
                 .foregroundColor(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if let engine = entry.engine {
+                Text(engine)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
 
             action
                 .controlSize(.small)
@@ -207,6 +213,7 @@ struct ThemePickerView: View {
                         ThemeCard(
                             name: theme.name,
                             author: theme.author,
+                            engine: theme.engine,
                             isSelected: themeManager.currentTheme?.id == theme.id,
                             previewSize: previewSize,
                             preview: cardPreview(theme)
@@ -391,6 +398,7 @@ struct ThemePickerView: View {
 struct ThemeCard<Preview: View>: View {
     let name: String
     var author: String? = nil
+    var engine: String? = nil
     let isSelected: Bool
     var previewSize = CGSize(width: 120, height: 60)
     let preview: Preview
@@ -425,6 +433,12 @@ struct ThemeCard<Preview: View>: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                }
+                if let engine = engine {
+                    Text(engine)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
             }
         }
@@ -617,12 +631,18 @@ struct ImagePickerRow: View {
 }
 
 struct AboutView: View {
+    @State private var showsCredits = false
+
+    private var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             Text("Trois")
                 .font(.system(size: 48, weight: .ultraLight))
 
-            Text("Version 1.0")
+            Text("Version \(version)")
                 .foregroundColor(.secondary)
 
             Text("Classic window themes for a modern Mac.")
@@ -630,29 +650,100 @@ struct AboutView: View {
             Divider()
                 .frame(width: 200)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("by sryo")
-                    .font(.caption)
-                Text("An homage to EppieDesktop for Windows")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("EppieDesktop by Jeff Epstein (1998-1999)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("Themes by their authors, via VirtualPlastic.net")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                feature("Themed buttons", "for close, minimize and zoom")
+                feature("Window frames", "drawn from each theme's chrome")
+                feature("Get Themes", "to browse and install from the gallery")
+                feature("Custom", "to build your own or mix parts from others")
             }
             .font(.callout)
 
             Spacer()
 
-            Text("Customize your traffic light buttons.")
+            Text("Made by sryo. Themes are the work of their authors.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            Button("Credits") { showsCredits = true }
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showsCredits) { CreditsView() }
+    }
+
+    private func feature(_ title: String, _ detail: String) -> some View {
+        (Text(title).bold() + Text(" \(detail)"))
+    }
+}
+
+// Tools and archives that themes come from. Add a line when a new engine or source lands.
+struct CreditsView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private static let engines: [(name: String, by: String)] = [
+        ("EppieDesktop", "Jeff Epstein, 1998-1999"),
+        ("Kaleidoscope", "Arlo Rose and Greg Landweber"),
+    ]
+
+    private static let archives: [(name: String, url: String)] = [
+        ("Virtual Plastic Eppie gallery", "https://www.virtualplastic.net/html/eppie.html"),
+        ("kaleidoscope.net scheme archive, via the Internet Archive", "https://web.archive.org/web/2002/http://www.kaleidoscope.net/"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Credits")
+                .font(.title2)
+
+            Text("Trois exists because of these tools and the people who made themes for them. It is not affiliated with any of them.")
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            section("Engines") {
+                ForEach(Self.engines, id: \.name) { engine in
+                    Text(engine.name).bold() + Text(" by \(engine.by)")
+                }
+            }
+
+            section("Theme archives") {
+                ForEach(Self.archives, id: \.name) { archive in
+                    if let url = URL(string: archive.url) {
+                        Link(archive.name, destination: url)
+                    }
+                }
+            }
+
+            section("Themes") {
+                Text("Each theme is the work of the author named on it. If you made one and want it credited differently or removed, open an issue.")
+                    .fixedSize(horizontal: false, vertical: true)
+                Link("github.com/sryo/trois-themes/issues", destination: URL(string: "https://github.com/sryo/trois-themes/issues")!)
+            }
+
+            section("Injection mode") {
+                HStack(spacing: 4) {
+                    Text("Uses the same approach as")
+                    Link("MacForge", destination: URL(string: "https://github.com/MacEnhance/MacForge")!)
+                }
+            }
+
+            Spacer()
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 440, height: 440)
+    }
+
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            content()
+        }
     }
 }
 

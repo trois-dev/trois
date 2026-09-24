@@ -1,8 +1,15 @@
 # Trois
 
-A macOS menu bar app that replaces window traffic light buttons (close, minimize, zoom) with custom themed images.
+Trois brings back the window themes of classic desktop customizers and keeps them working on a modern Mac. Themes from any engine are converted to one format, so new sources can be added without touching the app.
 
-An homage to EppieDesktop by Jeff Epstein. Compatible with EppieDesktop themes. Not affiliated with the original author.
+**Features:**
+
+- **Themed buttons** replace close, minimize and zoom
+- **Window frames** draw each theme's chrome around your windows
+- **One-click install** from the [theme gallery](https://sryo.github.io/trois-themes/)
+- **Custom tab** to build your own theme or mix parts from others
+
+Made by [sryo](https://github.com/sryo). Not affiliated with the original tools or their authors. See [Credits](#credits).
 
 ## Modes
 
@@ -63,6 +70,8 @@ A theme is a folder of button images (BMP, PNG, JPEG, GIF or TIFF) with a `theme
   "name": "My Theme",
   "author": "Your Name",
   "version": 1,
+  "engine": "EppieDesktop",
+  "source": "https://example.com/where-it-came-from",
   "buttons": {
     "close": "close_up.png",
     "closeDown": "close_down.png",
@@ -78,11 +87,15 @@ A theme is a folder of button images (BMP, PNG, JPEG, GIF or TIFF) with a `theme
 
 Button keys: `close`, `closeDown`, `closeDisabled`, `minimize`, `minimizeDown`, `minimizeDisabled`, `zoom`, `zoomDown`, `zoomDisabled`, `restore`, `restoreDown`, `help`, `helpDown`. Restore images show on the Zoom button while a window is zoomed or full screen.
 
+`engine` and `source` are optional. `engine` names the tool the theme was made for and shows under the theme's name; leave it out for themes made for Trois. `source` links to the original download or gallery.
+
 Without `theme.json`, Trois guesses from file names such as `close_up`, `close_down`, `min_up`, `max_up`, `restore_up` and `help_up` (underscores or spaces). To share a theme, add it to the catalog repo with a pull request.
 
 ### Window Borders
 
-A theme can also draw a frame around each window (overlay mode). Add a `frame/` folder with a Kaleidoscope 2 document window:
+A theme can also draw a frame around each window (overlay mode). Add a `frame/` folder. Its `layout.json` says which engine's rules draw it.
+
+Kaleidoscope 2.x, from the scheme's document window:
 
 | File | Contents |
 |------|----------|
@@ -91,7 +104,49 @@ A theme can also draw a frame around each window (overlay mode). Add a `frame/` 
 | `pressed.png` | Pressed close, zoom and collapse boxes, left to right (optional) |
 | `layout.json` | The scheme's `wnd#` layout: content, widget and title rects plus the part lists for each edge |
 
-The window sits in the content rect; everything around it draws outside the window, one point per image pixel. The frame's close, zoom and collapse boxes press the window's close, zoom and minimize buttons, and dragging the frame moves the window. Turn borders off in Settings > Themes.
+The window sits in the content rect; everything around it draws outside the window, one point per image pixel.
+
+Kaleidoscope 1.x, drawn by Kaleidoscope's fixed 1.x rules:
+
+| File | Contents |
+|------|----------|
+| `active.png` | 16x16 miniature window for the focused window |
+| `inactive.png` | Miniature window for other windows (optional) |
+| `stripes.png` | Title bar racing stripes (optional) |
+| `stripes_pattern.png` | Pattern behind the stripes (optional) |
+| `layout.json` | `{"format": "k1"}` |
+
+1.x frames use the theme's own `close`, `min` and `max` button images as the title bar boxes. The frame's close, zoom and collapse boxes press the window's close, zoom and minimize buttons, and dragging the frame moves the window. Turn borders off in Settings > Themes.
+
+## Supported Engines
+
+| Engine | Buttons | Frame | Converter |
+|--------|---------|-------|-----------|
+| EppieDesktop | Yes | No | None, themes are used as they are |
+| Kaleidoscope 2.x | Yes | Yes | `kaleidoscope/tools/convert.py` |
+| Kaleidoscope 1.x | Yes | Yes | `kaleidoscope/tools/convert.py` |
+
+### Adding an Engine
+
+1. Write a converter that outputs button images and a `theme.json` with `engine` and `source` set.
+2. If the engine has window frames, write a `frame/` folder. Reuse the 2.x layout format if it fits; otherwise give `layout.json` a new `format` value and add a renderer next to `WindowFrameK1.swift`.
+3. Add a row to the table above, and credit the tool and the archive below and in the app's Credits view (`SettingsView.swift`).
+
+## Credits
+
+Trois exists because of these tools and the people who made themes for them. It is not affiliated with any of them.
+
+- **EppieDesktop** by Jeff Epstein (1998-1999)
+- **Kaleidoscope** by Arlo Rose and Greg Landweber
+
+Themes were collected from:
+
+- The [Virtual Plastic Eppie gallery](https://www.virtualplastic.net/html/eppie.html)
+- The kaleidoscope.net scheme archive, recovered from the [Internet Archive](https://web.archive.org/)
+
+Each theme is the work of the author named in its `theme.json`. If you made one and want it credited differently or removed, [open an issue](https://github.com/sryo/trois-themes/issues).
+
+Injection mode uses the same approach as [MacForge](https://github.com/MacEnhance/MacForge).
 
 ## License
 

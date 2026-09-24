@@ -7,6 +7,9 @@ struct Theme: Identifiable, Hashable {
     let name: String
     let path: URL
     var author: String?
+    // Tool the theme was made for, e.g. "Kaleidoscope 1.x", and where it was collected.
+    var engine: String?
+    var source: URL?
     // From theme.json; catalog themes use it to offer updates.
     var version: Int?
     var closeUp: URL?
@@ -27,7 +30,7 @@ struct Theme: Identifiable, Hashable {
     var helpHover: URL?
     var helpDown: URL?
     var helpDisabled: URL?
-    // Kaleidoscope 2 window frame folder (frame/layout.json and images).
+    // Kaleidoscope window frame folder (frame/layout.json and images).
     var frameDirectory: URL?
 
     var hasAnyImage: Bool {
@@ -40,6 +43,8 @@ struct ThemeManifest: Codable {
     var name: String?
     var author: String?
     var version: Int?
+    var engine: String?
+    var source: String?
     // Button key to image path relative to the theme folder.
     var buttons: [String: String]?
     // Button keys, and frame.inactive / frame.pressed, that the Custom tab
@@ -171,6 +176,8 @@ class ThemeManager: ObservableObject {
             theme = Theme(id: directory.path, name: manifest.name ?? name, path: directory)
             theme.author = manifest.author
             theme.version = manifest.version
+            theme.engine = manifest.engine
+            theme.source = manifest.source.flatMap(URL.init(string:))
             if let buttons = manifest.buttons {
                 applyManifestButtons(buttons, in: directory, to: &theme)
                 if theme.hasAnyImage {
