@@ -42,8 +42,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         for url in urls where url.scheme?.lowercased() == "trois" && url.host?.lowercased() == "install" {
             let id = url.lastPathComponent
             guard ThemeCatalog.isValidID(id) else { continue }
-            showSettings(tab: .getThemes)
-            ThemeCatalog.shared.install(id)
+            showSettings(tab: .themes)
+            // The install error alert lives on the Gallery tab.
+            ThemeCatalog.shared.install(id) { result in
+                if case .failure = result { SettingsNavigation.shared.tab = .getThemes }
+            }
         }
     }
 
