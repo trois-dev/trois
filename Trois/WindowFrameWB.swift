@@ -106,14 +106,7 @@ extension WindowFrame {
                   title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat) -> (CGImage, Layout)? {
         let i = parts.insets
         let size = CGSize(width: windowSize.width + i.left + i.right, height: windowSize.height + i.top + i.bottom)
-        let width = Int(ceil(size.width * scale)), height = Int(ceil(size.height * scale))
-        guard width > 0, height > 0,
-              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: scale, y: -scale)
-        context.interpolationQuality = .none
+        guard let context = Self.frameContext(size: size, scale: scale) else { return nil }
 
         let W = size.width, H = size.height
         for side in [Side.left, .right, .top, .bottom] {
@@ -129,8 +122,8 @@ extension WindowFrame {
             drawWBEdge(art, edge: edge, in: box, horizontal: side.horizontal, context: context)
         }
 
+        // Edges stay within the insets, so the window's own area is still clear.
         let hole = CGRect(x: i.left, y: i.top, width: windowSize.width, height: windowSize.height)
-        context.clear(hole)
         if cornerRadius > 0, let left = parts.edges[.left],
            let color = Self.storedColor(isActive ? left.active : left.inactive, x: Int(i.left) - 1, y: left.active.height / 2) {
             fillCorners(of: hole, radius: cornerRadius, color: color.cgColor, in: context)
@@ -198,11 +191,7 @@ extension WindowFrame {
             if edge.tile {
                 context.saveGState()
                 context.clip(to: dest(start, span))
-                var at: CGFloat = 0
-                while at < span {
-                    draw(art, source: source(start, middle), in: dest(start + at, middle), context: context)
-                    at += middle
-                }
+                drawTiled(art, source: source(start, middle), first: dest(start, middle), context: context)
                 context.restoreGState()
             } else {
                 draw(art, source: source(start, middle), in: dest(start, span), context: context)

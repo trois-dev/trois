@@ -54,10 +54,25 @@ struct WindowFrame {
                      bottom: size.height - content.maxY, right: size.width - content.maxX)
     }
 
+    /// Reads an image and decodes it once. Images from a source decode
+    /// lazily into a purgeable cache, and each crop and draw can decode the
+    /// whole PNG again. The copy keeps the stored pixels and their layout,
+    /// which storedColor relies on.
+    static func loadImage(_ url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        guard let data = image.dataProvider?.data, let provider = CGDataProvider(data: data),
+              let space = image.colorSpace,
+              let copy = CGImage(width: image.width, height: image.height, bitsPerComponent: image.bitsPerComponent,
+                                 bitsPerPixel: image.bitsPerPixel, bytesPerRow: image.bytesPerRow, space: space,
+                                 bitmapInfo: image.bitmapInfo, provider: provider, decode: image.decode,
+                                 shouldInterpolate: image.shouldInterpolate, intent: image.renderingIntent) else { return image }
+        return copy
+    }
+
     init?(directory: URL) {
         func image(_ name: String) -> CGImage? {
-            guard let source = CGImageSourceCreateWithURL(directory.appendingPathComponent(name) as CFURL, nil) else { return nil }
-            return CGImageSourceCreateImageAtIndex(source, 0, nil)
+            Self.loadImage(directory.appendingPathComponent(name))
         }
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("layout.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -792,22 +807,16 @@ struct WindowFrame {
         let titleStyle = resolvedTitle(active: isActive)
         let titleWidth = title.map { titleStyle.width(of: $0) + 8 }
         let layout = layout(windowSize: windowSize, widgets: widgets, hidden: hidden, titleWidth: titleWidth)
-        let width = Int(ceil(layout.size.width * scale))
-        let height = Int(ceil(layout.size.height * scale))
-        guard width > 0, height > 0,
-              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        // Top-left origin, one unit per point.
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: scale, y: -scale)
-        context.interpolationQuality = .none
+        guard let context = Self.frameContext(size: layout.size, scale: scale) else { return nil }
 
         let image = isActive ? active : inactive
         let outer = layout.size
         let insets = self.insets
+        let hole = CGRect(x: insets.left, y: insets.top, width: windowSize.width, height: windowSize.height)
 
         // Sides first, over the full height, then top and bottom over them.
+        context.saveGState()
+        Self.clipOut(hole, size: outer, context: context)
         let sides = sides(outer: outer, widgets: widgets, cut: cutOut(hidden).subtracting(widgets), titleWidth: titleWidth)
         drawVertical(sides.left, from: image, sourceX: 0, width: Int(content.minX), destX: 0, in: context)
         drawVertical(sides.right, from: image, sourceX: Int(content.maxX), width: Int(insets.right),
@@ -815,10 +824,7 @@ struct WindowFrame {
         drawHorizontal(sides.top, from: image, sourceY: 0, height: Int(content.minY), destY: 0, in: context)
         drawHorizontal(sides.bottom, from: image, sourceY: Int(content.maxY), height: Int(insets.bottom),
                        destY: Int(outer.height - insets.bottom), in: context)
-
-        // Sides that overlap the window's own area are cut away.
-        let hole = CGRect(x: insets.left, y: insets.top, width: windowSize.width, height: windowSize.height)
-        context.clear(hole)
+        context.restoreGState()
         if cornerRadius > 0, let color = innerEdgeColor(image) {
             fillCorners(of: hole, radius: cornerRadius, color: color, in: context)
         }
@@ -834,6 +840,31 @@ struct WindowFrame {
         var drawn = layout
         drawn.shape = drawnShape(of: context, scale: scale, size: layout.size, hole: hole)
         return (result, drawn)
+    }
+
+    /// A bitmap for a frame `size` points big at `scale` pixels per point,
+    /// drawing with a top-left origin in points. New bitmaps start clear.
+    /// BGRA like window backing stores, so copying into one is a plain blit;
+    /// alpha is the fourth byte either way, as drawnShape reads it.
+    static func frameContext(size: CGSize, scale: CGFloat) -> CGContext? {
+        let width = Int(ceil(size.width * scale)), height = Int(ceil(size.height * scale))
+        guard width > 0, height > 0,
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                          | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: scale, y: -scale)
+        context.interpolationQuality = .none
+        return context
+    }
+
+    /// Keeps edges that run over the window's own area from drawing there,
+    /// so it stays clear without clearing a window-sized rect.
+    static func clipOut(_ hole: CGRect, size: CGSize, context: CGContext) {
+        context.addRect(CGRect(origin: .zero, size: size))
+        context.addRect(hole)
+        context.clip(using: .evenOdd)
     }
 
     // Past this many rects the shape is merged in bands of rows, trading
@@ -941,21 +972,21 @@ struct WindowFrame {
         let r = min(radius, hole.width / 2, hole.height / 2)
         let overlap = min(Self.cornerOverlap, r)
         guard r > 0 else { return }
-        context.saveGState()
-        context.clip(to: [
-            CGRect(x: hole.minX, y: hole.minY, width: r, height: r),
-            CGRect(x: hole.maxX - r, y: hole.minY, width: r, height: r),
-            CGRect(x: hole.minX, y: hole.maxY - r, width: r, height: r),
-            CGRect(x: hole.maxX - r, y: hole.maxY - r, width: r, height: r),
-        ])
-        let corners = CGMutablePath()
-        corners.addRect(hole)
-        corners.addRoundedRect(in: hole.insetBy(dx: overlap, dy: overlap),
-                               cornerWidth: r - overlap, cornerHeight: r - overlap)
-        context.addPath(corners)
+        let inner = CGPath(roundedRect: hole.insetBy(dx: overlap, dy: overlap),
+                           cornerWidth: r - overlap, cornerHeight: r - overlap, transform: nil)
         context.setFillColor(color)
-        context.fillPath(using: .evenOdd)
-        context.restoreGState()
+        // One corner at a time, so each fill covers only its square.
+        for corner in [CGRect(x: hole.minX, y: hole.minY, width: r, height: r),
+                       CGRect(x: hole.maxX - r, y: hole.minY, width: r, height: r),
+                       CGRect(x: hole.minX, y: hole.maxY - r, width: r, height: r),
+                       CGRect(x: hole.maxX - r, y: hole.maxY - r, width: r, height: r)] {
+            context.saveGState()
+            context.clip(to: corner)
+            context.addRect(corner)
+            context.addPath(inner)
+            context.fillPath(using: .evenOdd)
+            context.restoreGState()
+        }
     }
 
     private func innerEdgeColor(_ image: CGImage) -> CGColor? {
@@ -1090,15 +1121,16 @@ struct WindowFrame {
         }
         let tiles = Part.grows.contains(code) || Part.fills.contains(code) || code == Part.title
         let fromEnd = code == Part.stretchEnd || code == Part.periodFillEnd
+        let offset = fromEnd ? span - step : 0
+        let first = horizontal
+            ? CGRect(x: dest.minX + offset, y: dest.minY, width: source.width, height: source.height)
+            : CGRect(x: dest.minX, y: dest.minY + offset, width: source.width, height: source.height)
         context.saveGState()
         context.clip(to: dest)
-        let count = tiles ? Int(ceil(span / step)) : 1
-        for i in 0..<count {
-            let offset = fromEnd ? span - step * CGFloat(i + 1) : step * CGFloat(i)
-            let tile = horizontal
-                ? CGRect(x: dest.minX + offset, y: dest.minY, width: source.width, height: source.height)
-                : CGRect(x: dest.minX, y: dest.minY + offset, width: source.width, height: source.height)
-            draw(image, source: source, in: tile, context: context)
+        if tiles {
+            drawTiled(image, source: source, first: first, context: context)
+        } else {
+            draw(image, source: source, in: first, context: context)
         }
         context.restoreGState()
     }
@@ -1111,6 +1143,18 @@ struct WindowFrame {
         context.translateBy(x: dest.minX, y: dest.maxY)
         context.scaleBy(x: 1, y: -1)
         context.draw(crop, in: CGRect(origin: .zero, size: dest.size))
+        context.restoreGState()
+    }
+
+    /// Repeats `source` of `image` across the clip in both directions, one
+    /// tile landing at `first`. A single draw, where a loop of tiles costs
+    /// one image lock per tile.
+    func drawTiled(_ image: CGImage, source: CGRect, first: CGRect, context: CGContext) {
+        guard let crop = image.cropping(to: source) else { return }
+        context.saveGState()
+        context.translateBy(x: first.minX, y: first.maxY)
+        context.scaleBy(x: 1, y: -1)
+        context.draw(crop, in: CGRect(origin: .zero, size: first.size), byTiling: true)
         context.restoreGState()
     }
 }

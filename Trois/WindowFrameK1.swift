@@ -39,8 +39,7 @@ extension WindowFrame {
     static func loadK1Parts(frameDirectory: URL, image: (String) -> CGImage?) -> K1Parts {
         let theme = frameDirectory.deletingLastPathComponent()
         func icon(_ name: String) -> CGImage? {
-            guard let source = CGImageSourceCreateWithURL(theme.appendingPathComponent(name) as CFURL, nil) else { return nil }
-            return CGImageSourceCreateImageAtIndex(source, 0, nil)
+            loadImage(theme.appendingPathComponent(name))
         }
         var widgets: [Widget: (up: CGImage, down: CGImage?)] = [:]
         for (widget, base) in [(Widget.close, "close"), (.zoom, "max"), (.collapse, "min")] {
@@ -70,14 +69,7 @@ extension WindowFrame {
                   title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat) -> (CGImage, Layout)? {
         let i = Self.k1Insets
         let size = CGSize(width: windowSize.width + i.left + i.right, height: windowSize.height + i.top + i.bottom)
-        let width = Int(ceil(size.width * scale)), height = Int(ceil(size.height * scale))
-        guard width > 0, height > 0,
-              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: scale, y: -scale)
-        context.interpolationQuality = .none
+        guard let context = Self.frameContext(size: size, scale: scale) else { return nil }
 
         let icon = isActive ? active : inactive
         let W = size.width, H = size.height, b = CGFloat(Self.k1Border)
@@ -100,8 +92,8 @@ extension WindowFrame {
         // Bottom border: the icon's last six rows.
         band(sourceY: 10, rows: 6, destY: H - b, height: b)
 
+        // Edges stay within the insets, so the window's own area is still clear.
         let hole = CGRect(x: i.left, y: i.top, width: windowSize.width, height: windowSize.height)
-        context.clear(hole)
         if cornerRadius > 0, let color = k1Pixel(icon, x: 5, y: 7) {
             fillCorners(of: hole, radius: cornerRadius, color: color, in: context)
         }
@@ -182,15 +174,8 @@ extension WindowFrame {
         guard w > 0, h > 0 else { return }
         context.saveGState()
         context.clip(to: rect)
-        var y = rect.minY
-        while y < rect.maxY {
-            var x = rect.minX
-            while x < rect.maxX {
-                draw(pattern, source: CGRect(x: 0, y: 0, width: w, height: h), in: CGRect(x: x, y: y, width: w, height: h), context: context)
-                x += w
-            }
-            y += h
-        }
+        drawTiled(pattern, source: CGRect(x: 0, y: 0, width: w, height: h),
+                  first: CGRect(x: rect.minX, y: rect.minY, width: w, height: h), context: context)
         context.restoreGState()
     }
 

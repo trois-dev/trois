@@ -326,6 +326,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func reloadOverlayImages() {
+        OverlayWindow.clearArtCache()
         multiWindowTracker?.reloadAllImages()
 
         // Also notify injected apps

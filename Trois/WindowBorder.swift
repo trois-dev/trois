@@ -78,11 +78,19 @@ final class BorderWindow {
     private var layout: WindowFrame.Layout?
     // Drawn and hidden widgets as of the last redraw.
     private var layoutWidgets: [Set<WindowFrame.Widget>]?
-    // Size of the window-server shape and the context drawing into it. The
-    // context is tied to the backing store it was made for, so a new shape
-    // needs a new context.
+    // Size of the window-server shape, and the context drawing into it,
+    // kept across shape changes.
     private var shapeSize: CGSize = .zero
     private var context: CGContext?
+    // Where the last art went in the context, cleared before the next.
+    private var drawnRect: CGRect = .zero
+    private var isLiveResizing = false
+    private var liveResizeEnd: DispatchWorkItem?
+    // Shapes are rounded up to this many points.
+    private static let shapeStep: CGFloat = 128
+    // Room a live resize gets to grow into, as a fraction of the size.
+    private static let liveResizeRoom: CGFloat = 0.5
+    private static let liveResizePause: TimeInterval = 0.25
     private var level: Int32 = 0
     private var cornerRadius = BorderWindow.fallbackCornerRadius
     private var closed = false
@@ -191,6 +199,18 @@ final class BorderWindow {
         let resized = frame.size != targetFrame.size
         targetFrame = frame
         if resized {
+            // Reshaping the window mid-resize shows stale or missing art for
+            // a frame or more, so the shape gets room to grow into and is
+            // fitted again once the resize pauses.
+            isLiveResizing = true
+            liveResizeEnd?.cancel()
+            let end = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.isLiveResizing = false
+                self.redraw()
+            }
+            liveResizeEnd = end
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.liveResizePause, execute: end)
             redraw()
         } else {
             place()
@@ -290,28 +310,46 @@ final class BorderWindow {
         self.layout = layout
         layoutWidgets = target.map { [$0.widgets, $0.hiddenWidgets] }
         let cid = SkyLight.cid
-        let reshape = layout.size != shapeSize
+        // The art sits at the shape's top left and the rest stays clear. The
+        // shape is rounded up, with extra room during a live resize, and only
+        // changes when the art outgrows it or, at rest, has room to spare.
+        let step = Self.shapeStep
+        func rounded(_ v: CGFloat) -> CGFloat { ceil(v / step) * step }
+        let room = isLiveResizing ? 1 + Self.liveResizeRoom : 1
+        let wanted = CGSize(width: rounded(layout.size.width * room), height: rounded(layout.size.height * room))
+        let outgrown = layout.size.width > shapeSize.width || layout.size.height > shapeSize.height
+        let spare = !isLiveResizing && shapeSize != wanted
+        let reshape = outgrown || spare
 
         // The context draws straight into the backing store, and a screen update
         // can land mid-draw, e.g. while a click raises a window. Freezing keeps
-        // the old art on screen until the new art is flushed. A new size also
-        // changes the shape and position, so screen updates are held too, making
-        // all three appear together.
-        if reshape {
-            _ = SkyLight.disableUpdate?(cid)
-        }
+        // the old art on screen until the new art is flushed. A new shape also
+        // moves the window, so screen updates are held too, making both appear
+        // together.
         _ = SkyLight.freezeWindow?(cid, windowNumber, nil)
         if reshape {
-            setShape(layout.size)
+            _ = SkyLight.disableUpdate?(cid)
+            setShape(wanted)
         }
+        // One context for the window's life. A new one made after a reshape
+        // can still draw into the old backing store, losing the art.
         if context == nil {
             context = SkyLight.windowContextCreate?(cid, windowNumber, nil)?.takeRetainedValue()
             context?.interpolationQuality = .none
         }
         if let context {
-            // Copy replaces every pixel, transparent ones included, so no clear is needed.
+            // The context's origin is the bottom left, so the art is raised to
+            // the top. Copy replaces every pixel it covers, transparent ones
+            // included; what the last art covered outside it is cleared.
             context.setBlendMode(.copy)
-            context.draw(image, in: CGRect(origin: .zero, size: layout.size))
+            let art = CGRect(x: 0, y: shapeSize.height - layout.size.height, width: layout.size.width, height: layout.size.height)
+            if reshape {
+                context.clear(CGRect(origin: .zero, size: shapeSize))
+            } else if !art.contains(drawnRect) {
+                context.clear(drawnRect)
+            }
+            context.draw(image, in: art)
+            drawnRect = art
             context.flush()
             _ = SkyLight.flushWindow?(cid, windowNumber, nil)
         }
@@ -341,7 +379,6 @@ final class BorderWindow {
         let origin = outerFrame.origin
         _ = setShape(SkyLight.cid, windowNumber, Float(origin.x), Float(origin.y), region)
         shapeSize = size
-        context = nil
     }
 
     private func updateEventShape() {
@@ -432,7 +469,11 @@ final class BorderWindow {
 
     private func mouseUp(with event: NSEvent) {
         if let trackingWidget, pressedWidget == trackingWidget {
-            press(trackingWidget)
+            if event.modifierFlags.contains(.option), trackingWidget != .zoom {
+                OverlayManager.pressAll(trackingWidget == .close ? kAXCloseButtonAttribute : kAXMinimizeButtonAttribute, of: pid)
+            } else {
+                press(trackingWidget)
+            }
         }
         trackingWidget = nil
         dragStart = nil

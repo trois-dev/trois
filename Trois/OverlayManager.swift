@@ -294,7 +294,29 @@ class OverlayManager {
             self.pendingPress = type
             self.refresh()
         }
+        let attribute = type == .close ? kAXCloseButtonAttribute : kAXMinimizeButtonAttribute
+        overlay.pressAll = { [weak self] in
+            guard let self else { return }
+            Self.pressAll(attribute, of: self.pid)
+        }
         return overlay
+    }
+
+    /// Presses one button on every window of an app, as Option-clicking
+    /// close or minimize does on system buttons.
+    static func pressAll(_ attribute: String, of pid: pid_t) {
+        AXQueue.async {
+            let app = AXUIElementCreateApplication(pid)
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+                  let windows = value as? [AXUIElement] else { return }
+            for window in windows {
+                var button: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(window, attribute as CFString, &button) == .success,
+                      let button, CFGetTypeID(button) == AXUIElementGetTypeID() else { continue }
+                AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+            }
+        }
     }
 
     private func overlaysWithOffsets() -> [(OverlayWindow, CGRect)] {
@@ -656,16 +678,29 @@ enum TrafficLightType {
     case zoom
 }
 
-class OverlayWindow: NSWindow {
+// A non-activating panel, so clicking a button leaves Trois in the background
+// and the target app keeps focus, as the system buttons do.
+class OverlayWindow: NSPanel {
     let buttonType: TrafficLightType
     var targetButton: AXUIElement?
     // Called on main when a press found targetButton gone, e.g. after Arc
     // rebuilt its buttons.
     var pressFailed: (() -> Void)?
     private var imageView: NSImageView!
+    // Called on main for an Option-click, which presses this button on every
+    // window of the app.
+    var pressAll: (() -> Void)?
     private var trackingArea: NSTrackingArea?
+    // A press started on this button and the mouse is still held.
     private var isMouseDown = false
-    private var isMouseInside = false
+    // The arrow cursor is pushed while the mouse is inside, and popped when
+    // it leaves by any route: an exit, a drag out, a hide or a close.
+    private var isMouseInside = false {
+        didSet {
+            guard isMouseInside != oldValue else { return }
+            if isMouseInside { NSCursor.arrow.push() } else { NSCursor.pop() }
+        }
+    }
     private var imageSize: NSSize = NSSize(width: 14, height: 14)
     private var buttonCenter: CGPoint = .zero
     private var windowIsZoomed = false
@@ -683,19 +718,27 @@ class OverlayWindow: NSWindow {
     // Covered parts currently masked out, in view coordinates. Nil forces an update.
     private var clipRects: [CGRect]? = []
     // Sized art by key, state, cover, scale and sizing mode, so hovering doesn't
-    // reload and reprocess files. Nil entries remember a missing image.
-    private var artCache: [String: NSImage?] = [:]
+    // reload and reprocess files. Nil entries remember a missing image. Shared
+    // by every window's overlays, which show the same theme.
+    private static var artCache: [String: NSImage?] = [:]
+
+    /// Drops cached art after the theme's files changed.
+    static func clearArtCache() {
+        artCache.removeAll()
+    }
 
     init(buttonType: TrafficLightType) {
         self.buttonType = buttonType
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 14, height: 14),
-            styleMask: .borderless,
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
 
         self.level = .floating
+        // Panels hide when their app deactivates, which Trois always is.
+        self.hidesOnDeactivate = false
         // Owned by OverlayManager. close() must not also release it.
         self.isReleasedWhenClosed = false
         // orderOut otherwise fades for about 250ms, trailing buttons that vanish at once.
@@ -745,19 +788,28 @@ class OverlayWindow: NSWindow {
         reloadImageForMouseState()
     }
 
-    /// Reads the theme's files again after they changed.
+    /// Shows the theme's art again, after clearArtCache().
     func reloadTheme() {
-        artCache.removeAll()
         reloadImageForMouseState()
     }
 
     // The mouse can be inside when the window goes, e.g. after a click on close.
     override func close() {
-        if isMouseInside {
-            isMouseInside = false
-            NSCursor.pop()
-        }
+        resetMouse()
         super.close()
+    }
+
+    // A hidden overlay gets no exit event, so it would come back hovered.
+    override func orderOut(_ sender: Any?) {
+        resetMouse()
+        super.orderOut(sender)
+    }
+
+    private func resetMouse() {
+        guard isMouseDown || isMouseInside else { return }
+        isMouseDown = false
+        isMouseInside = false
+        reloadImageForMouseState()
     }
 
     func loadHoverImage() {
@@ -778,8 +830,10 @@ class OverlayWindow: NSWindow {
         }
     }
 
+    // The one place art follows the mouse. Pressed only while a press that
+    // started here is held over the button.
     private func reloadImageForMouseState() {
-        if isMouseDown {
+        if isMouseDown && isMouseInside {
             loadPressedImage()
         } else if isMouseInside {
             loadHoverImage()
@@ -837,11 +891,11 @@ class OverlayWindow: NSWindow {
     private func art(_ baseKey: String, state: String) -> NSImage? {
         let mode = ButtonArt.Sizing.current
         let key = "\(baseKey)\(state)|\(coverSize)|\(backingScale)|\(mode.rawValue)"
-        if let cached = artCache[key] { return cached }
+        if let cached = Self.artCache[key] { return cached }
         let image = trimmedImage(baseKey, state: state).map {
             ButtonArt.sized($0, cover: coverSize, backing: backingScale, mode: mode)
         }
-        artCache[key] = image
+        Self.artCache[key] = image
         return image
     }
 
@@ -990,49 +1044,45 @@ class OverlayWindow: NSWindow {
 
         // Fully covered overlays must not catch clicks meant for the covering window.
         ignoresMouseEvents = covered.contains { $0.contains(bounds) }
+        if ignoresMouseEvents { resetMouse() }
     }
 
     /// Tells AppKit where the window server already has the overlay. Deferred
     /// until motion stops so the AppKit round-trip stays off the hot path.
+    /// AppKit's frame was stale during the move, so an exit may have been
+    /// missed; the hover is checked against the mouse here.
     func syncAppKitFrame() {
-        guard appKitStale else { return }
-        repositionOnCenter()
+        if appKitStale {
+            repositionOnCenter()
+        }
+        if isMouseInside && !isMouseDown && !frame.contains(NSEvent.mouseLocation) {
+            resetMouse()
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
         isMouseDown = true
-        loadPressedImage()
+        isMouseInside = true
+        reloadImageForMouseState()
     }
 
     override func mouseUp(with event: NSEvent) {
-        // Only perform action if mouse is still inside
         if isMouseDown && isMouseInside {
-            press(retry: true)
+            if event.modifierFlags.contains(.option), buttonType != .zoom, let pressAll {
+                pressAll()
+            } else {
+                press(retry: true)
+            }
         }
         isMouseDown = false
-        // Restore appropriate image
-        if isMouseInside {
-            loadHoverImage()
-        } else {
-            loadCustomImage()
-        }
+        reloadImageForMouseState()
     }
 
     override func mouseDragged(with event: NSEvent) {
-        // Check if mouse is still within bounds
-        let location = event.locationInWindow
-        let inside = contentView?.bounds.contains(location) ?? false
-
-        if inside != isMouseInside {
-            isMouseInside = inside
-            if isMouseDown {
-                if inside {
-                    loadPressedImage()
-                } else {
-                    loadCustomImage()
-                }
-            }
-        }
+        let inside = contentView?.bounds.contains(event.locationInWindow) ?? false
+        guard inside != isMouseInside else { return }
+        isMouseInside = inside
+        reloadImageForMouseState()
     }
 
     func press(retry: Bool) {
@@ -1048,19 +1098,11 @@ class OverlayWindow: NSWindow {
 
     override func mouseEntered(with event: NSEvent) {
         isMouseInside = true
-        if isMouseDown {
-            loadPressedImage()
-        } else {
-            loadHoverImage()
-        }
-        NSCursor.arrow.push()
+        reloadImageForMouseState()
     }
 
     override func mouseExited(with event: NSEvent) {
         isMouseInside = false
-        if !isMouseDown {
-            loadCustomImage()
-        }
-        NSCursor.pop()
+        reloadImageForMouseState()
     }
 }

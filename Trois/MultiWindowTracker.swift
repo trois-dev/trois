@@ -11,7 +11,9 @@ struct ButtonFrames: Equatable {
 // Motion comes from window-server move/resize events, so overlays follow at
 // window-server latency without AX reads. AX is only read when a window is
 // first seen or its size changes, on AXQueue so a slow app can't stall motion.
-// A periodic scan picks up new and closed windows and focus changes.
+// Window-server show/hide/reorder events and AX focus and new-window
+// notifications prompt a scan, which picks up new, closed and refocused
+// windows. A slow periodic scan backs them up, for apps that don't post.
 //
 // Button overlays can't be ordered directly above another app's window, so they
 // stay floating and are clipped wherever a window in front of their target
@@ -35,6 +37,7 @@ class MultiWindowTracker {
     private var dockWindows: Set<CGWindowID> = []
     private var lastDockEvent: CFAbsoluteTime = 0
     private var scanTimer: Timer?
+    private var verifyTimer: Timer?
     private var scanQueued = false
     private var clippingQueued = false
     // CGWindowListCopyWindowInfo can block for hundreds of ms while the window
@@ -52,7 +55,6 @@ class MultiWindowTracker {
     // top edge. It stays ordered in, at alpha 0 while hidden, and moves a few
     // points while the buttons slide in or out.
     private var titleBars: [CGWindowID: CGWindowID] = [:]
-    private var mouseMonitor: Any?
     // Windows whose first AX lookup is in flight, and the windows the last scan saw.
     private var lookingUp: Set<CGWindowID> = []
     private var seenWindows: Set<CGWindowID> = []
@@ -66,6 +68,10 @@ class MultiWindowTracker {
     // Extra reads made because button offsets kept changing, per window.
     private var followUpReads: [CGWindowID: Int] = [:]
 
+    // Scans come from events; this is only the backstop.
+    private static let scanInterval: TimeInterval = 0.5
+    // Button checks for apps that move buttons without telling anyone.
+    private static let verifyInterval: TimeInterval = 0.1
     // Motion is considered over this long after the last move event.
     private static let settleDelay: TimeInterval = 0.1
     private static let maxFollowUpReads = 3
@@ -98,6 +104,9 @@ class MultiWindowTracker {
         buttonWatcher.buttonsChanged = { [weak self] wid in
             self?.buttonsChanged(wid)
         }
+        buttonWatcher.windowsChanged = { [weak self] in
+            self?.queueScan()
+        }
         WindowServerEvents.start()
         WindowServerEvents.handler = { [weak self] event, wid in
             self?.handle(event: event, wid: wid)
@@ -107,6 +116,8 @@ class MultiWindowTracker {
         for name in [NSWorkspace.didLaunchApplicationNotification,
                      NSWorkspace.didTerminateApplicationNotification,
                      NSWorkspace.didActivateApplicationNotification,
+                     NSWorkspace.didHideApplicationNotification,
+                     NSWorkspace.didUnhideApplicationNotification,
                      NSWorkspace.activeSpaceDidChangeNotification] {
             center.addObserver(self, selector: #selector(workspaceChanged), name: name, object: nil)
         }
@@ -117,23 +128,18 @@ class MultiWindowTracker {
             object: nil
         )
 
-        // A click can raise a window or focus another window of the same app,
-        // which posts no workspace notification. The app does that after the
-        // click, so check a few times shortly after instead of waiting for the
-        // next scan.
-        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
-            for delay in [0.03, 0.1, 0.25] {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.scan() }
-            }
-        }
-
         // Without window-server events the scan is also what moves overlays.
-        let interval: TimeInterval = WindowServerEvents.isAvailable ? 0.1 : 1.0 / 60.0
+        let interval: TimeInterval = WindowServerEvents.isAvailable ? Self.scanInterval : 1.0 / 60.0
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.scan()
         }
         RunLoop.main.add(timer, forMode: .common)
         scanTimer = timer
+        let verify = Timer(timeInterval: Self.verifyInterval, repeats: true) { [weak self] _ in
+            self?.verifyActiveWindows()
+        }
+        RunLoop.main.add(verify, forMode: .common)
+        verifyTimer = verify
 
         findDockWindows()
         scan()
@@ -142,10 +148,8 @@ class MultiWindowTracker {
     func stopTracking() {
         scanTimer?.invalidate()
         scanTimer = nil
-        if let mouseMonitor {
-            NSEvent.removeMonitor(mouseMonitor)
-        }
-        mouseMonitor = nil
+        verifyTimer?.invalidate()
+        verifyTimer = nil
         WindowServerEvents.handler = nil
         WindowServerEvents.subscribe([])
         subscribed = []
@@ -173,10 +177,12 @@ class MultiWindowTracker {
     }
 
     @objc private func workspaceChanged(_ notification: Notification) {
-        if notification.name == NSWorkspace.didLaunchApplicationNotification,
-           let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-           app.bundleIdentifier == "com.apple.dock" {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        if notification.name == NSWorkspace.didLaunchApplicationNotification, app?.bundleIdentifier == "com.apple.dock" {
             findDockWindows()
+        }
+        if notification.name == NSWorkspace.didTerminateApplicationNotification, let app {
+            buttonWatcher.forget(app.processIdentifier)
         }
         scan()
     }
@@ -266,6 +272,9 @@ class MultiWindowTracker {
         case WindowServerEvents.destroyed:
             removeWindow(wid)
             updateSubscription()
+        case WindowServerEvents.hidden, WindowServerEvents.shown:
+            // Minimized, hidden with its app, or back: the scan drops or keeps it.
+            queueScan()
         default:
             break
         }
@@ -538,7 +547,6 @@ class MultiWindowTracker {
         for (pid, windows) in lookups {
             lookUp(windows, of: pid)
         }
-        verifyActiveWindows()
     }
 
     // Some apps move their buttons without moving the window or posting any AX
@@ -754,22 +762,33 @@ class MultiWindowTracker {
 // Watches tracked windows' button elements for AXUIElementDestroyed. Some apps
 // rebuild their buttons without moving or resizing the window, which fires no
 // window-server event. Arc does it when its sidebar is shown or hidden. Also
-// watches each window's title, which the frame draws.
+// watches each window's title, which the frame draws, and each app's focus
+// changes and new or unminimized windows, which a click or shortcut inside
+// the app brings with no workspace notification.
 final class ButtonWatcher {
     // Called on main with the window whose buttons went away or whose title changed.
     var buttonsChanged: ((CGWindowID) -> Void)?
+    // Called on main when an app's focused window changed or it showed a window.
+    var windowsChanged: (() -> Void)?
     private var observers: [pid_t: AXObserver] = [:]
     private var watched: [CGWindowID: (pid: pid_t, elements: [(AXUIElement, CFString)])] = [:]
 
     // AX callbacks can't capture, so they reach the live watcher through here.
     private static weak var current: ButtonWatcher?
 
+    private static let appNotifications = [kAXFocusedWindowChangedNotification, kAXWindowCreatedNotification,
+                                           kAXWindowDeminiaturizedNotification]
+
     // The refcon carries the window id rather than a pointer, so a callback
     // arriving after unwatch() finds nothing to free and at worst triggers a
-    // spare refresh.
+    // spare refresh. App notifications carry no window id.
     private static let callback: AXObserverCallback = { _, _, _, refcon in
         let wid = CGWindowID(UInt(bitPattern: refcon))
-        ButtonWatcher.current?.buttonsChanged?(wid)
+        if wid == 0 {
+            ButtonWatcher.current?.windowsChanged?()
+        } else {
+            ButtonWatcher.current?.buttonsChanged?(wid)
+        }
     }
 
     func start() {
@@ -779,6 +798,9 @@ final class ButtonWatcher {
     func stop() {
         for wid in Array(watched.keys) {
             unwatch(wid)
+        }
+        for pid in Array(observers.keys) {
+            forget(pid)
         }
         if Self.current === self {
             Self.current = nil
@@ -813,10 +835,14 @@ final class ButtonWatcher {
                 AXObserverRemoveNotification(observer, element, notification)
             }
         }
-        if !watched.values.contains(where: { $0.pid == entry.pid }) {
-            observers[entry.pid] = nil
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
-        }
+    }
+
+    /// Drops an app's observer, once the app quit or tracking stopped. It's
+    /// kept while the app runs, so its last window coming back from the Dock
+    /// is still heard.
+    func forget(_ pid: pid_t) {
+        guard let observer = observers.removeValue(forKey: pid) else { return }
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
     }
 
     private func observer(for pid: pid_t) -> AXObserver? {
@@ -827,6 +853,12 @@ final class ButtonWatcher {
         guard AXObserverCreate(pid, Self.callback, &observer) == .success, let observer else { return nil }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         observers[pid] = observer
+        let app = AXUIElementCreateApplication(pid)
+        AXQueue.async {
+            for notification in Self.appNotifications {
+                AXObserverAddNotification(observer, app, notification as CFString, nil)
+            }
+        }
         return observer
     }
 }
