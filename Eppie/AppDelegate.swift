@@ -127,36 +127,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // Template version of the app mark: three discs spaced by their radius, overlaps drawn lighter.
+    // Template version of the app mark: three solid discs spaced by their radius,
+    // each overlap cut free by a transparent gap. Rendered per scale so edges stay sharp.
     private static func menuBarImage() -> NSImage {
+        let size = NSSize(width: 24, height: 12)
         let r: CGFloat = 6
         let xs: [CGFloat] = [6, 12, 18]
-        func disc(_ x: CGFloat) -> NSBezierPath {
-            NSBezierPath(ovalIn: NSRect(x: x - r, y: 0, width: r * 2, height: r * 2))
+        let gap: CGFloat = 1.5
+        func disc(_ x: CGFloat) -> CGPath {
+            CGPath(ellipseIn: CGRect(x: x - r, y: 0, width: r * 2, height: r * 2), transform: nil)
         }
-        let image = NSImage(size: NSSize(width: 24, height: 12), flipped: false) { bounds in
-            // Outer discs only touch at one point, so each disc's neighbors never overlap inside it.
-            for (i, x) in xs.enumerated() {
-                NSGraphicsContext.saveGraphicsState()
-                disc(x).addClip()
-                let outsideNeighbors = NSBezierPath(rect: bounds)
-                outsideNeighbors.windingRule = .evenOdd
-                for j in [i - 1, i + 1] where xs.indices.contains(j) {
-                    outsideNeighbors.append(disc(xs[j]))
-                }
-                outsideNeighbors.addClip()
-                NSColor.black.setFill()
-                bounds.fill()
-                NSGraphicsContext.restoreGraphicsState()
-            }
+        let image = NSImage(size: size)
+        for scale in [1, 2] as [CGFloat] {
+            guard let ctx = CGContext(data: nil, width: Int(size.width * scale), height: Int(size.height * scale),
+                                      bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { continue }
+            ctx.scaleBy(x: scale, y: scale)
+            ctx.setFillColor(.black)
+            xs.forEach { ctx.addPath(disc($0)) }
+            ctx.fillPath()
+            // A lens outline is each disc's arc inside its neighbor; stroking it clear masks out the gap.
+            ctx.setBlendMode(.clear)
+            ctx.setLineWidth(gap)
             for i in 0..<xs.count - 1 {
-                NSGraphicsContext.saveGraphicsState()
-                disc(xs[i]).addClip()
-                NSColor.black.withAlphaComponent(0.45).setFill()
-                disc(xs[i + 1]).fill()
-                NSGraphicsContext.restoreGraphicsState()
+                for (inner, outer) in [(xs[i], xs[i + 1]), (xs[i + 1], xs[i])] {
+                    ctx.saveGState()
+                    ctx.addPath(disc(inner))
+                    ctx.clip()
+                    ctx.addPath(disc(outer))
+                    ctx.strokePath()
+                    ctx.restoreGState()
+                }
             }
-            return true
+            guard let cgImage = ctx.makeImage() else { continue }
+            let rep = NSBitmapImageRep(cgImage: cgImage)
+            rep.size = size
+            image.addRepresentation(rep)
         }
         image.isTemplate = true
         image.accessibilityDescription = "Trois"
