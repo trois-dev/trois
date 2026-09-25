@@ -30,7 +30,7 @@ enum FramePreviewRenderer {
         cache.countLimit = 300
         return cache
     }()
-    private static let queue = DispatchQueue(label: "Trois.framepreview", qos: .userInitiated, attributes: .concurrent)
+    private static let queue = DispatchQueue(label: "com.trois.app.framepreview", qos: .userInitiated, attributes: .concurrent)
 
     /// Identifies one rendering. The art's and layout's modification dates
     /// are part of it, so a reinstalled or edited frame draws again.

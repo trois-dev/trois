@@ -15,7 +15,7 @@ Open an issue with the bug template. Include your macOS version, Trois version, 
 
 Requires Xcode and macOS 13 or later.
 
-1. Open `Eppie.xcodeproj` and run the `Eppie` scheme for normal development.
+1. Open `Trois.xcodeproj` and run the `Trois` scheme for normal development.
 2. To build the full app with injection support, run `./build.sh --no-deploy`. It builds `TroisLoader` and `TroisInjector` first and bundles them into the app. Without `--no-deploy` it also replaces `/Applications/Trois.app`. It signs ad hoc unless `TROIS_SIGN_IDENTITY` names a signing identity in your keychain; macOS asks for Accessibility permission again after each ad hoc build.
 
 Overlay mode only needs the Accessibility permission. You don't need to disable SIP unless you're working on Injection mode.

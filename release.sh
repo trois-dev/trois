@@ -16,15 +16,15 @@ if [ -z "$NOTARY_PROFILE" ]; then
     exit 1
 fi
 
-VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PROJECT_DIR/Eppie/Info.plist")
+VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PROJECT_DIR/Trois/Info.plist")
 ZIP="$OUT_DIR/Trois-$VERSION.zip"
 
 "$LOADER_DIR/build.sh"
 "$INJECTOR_DIR/build.sh"
 
 echo "Building Trois $VERSION..."
-xcodebuild -project "$PROJECT_DIR/Eppie.xcodeproj" \
-    -scheme Eppie \
+xcodebuild -project "$PROJECT_DIR/Trois.xcodeproj" \
+    -scheme Trois \
     -configuration Release \
     -derivedDataPath "$BUILD_DIR" \
     clean build 2>&1 | { grep -E "(error:|BUILD)" || true; }
@@ -47,7 +47,7 @@ echo "Signing..."
 sign() { codesign --force --timestamp --options runtime --sign "$IDENTITY" "$@"; }
 sign "$RESOURCES_PATH/TroisLoader.bundle"
 sign --entitlements "$INJECTOR_DIR/TroisInjector.entitlements" "$LAUNCH_SERVICES_PATH/com.trois.app.Injector"
-sign --entitlements "$PROJECT_DIR/Eppie/Trois.entitlements" "$APP_PATH"
+sign --entitlements "$PROJECT_DIR/Trois/Trois.entitlements" "$APP_PATH"
 codesign --verify --strict --deep "$APP_PATH"
 
 mkdir -p "$OUT_DIR"

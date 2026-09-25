@@ -39,7 +39,7 @@ class MultiWindowTracker {
     private var clippingQueued = false
     // CGWindowListCopyWindowInfo can block for hundreds of ms while the window
     // server is busy, so it's read here and applied on main.
-    private let windowListQueue = DispatchQueue(label: "Trois.windowlist", qos: .userInteractive)
+    private let windowListQueue = DispatchQueue(label: "com.trois.app.windowlist", qos: .userInteractive)
     private var scanInFlight = false
     private var scanAgain = false
     // Normal-level windows of other apps, front to back, and their frames in

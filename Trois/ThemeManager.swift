@@ -103,7 +103,7 @@ class ThemeManager: ObservableObject {
 
     let themesDirectory: URL
     let fileManager = FileManager.default
-    private let installQueue = DispatchQueue(label: "Trois.themeinstall", qos: .userInitiated)
+    private let installQueue = DispatchQueue(label: "com.trois.app.themeinstall", qos: .userInitiated)
 
     // Authors from the VirtualPlastic.net gallery, for its themes dropped in by
     // hand without a theme.json. Catalog themes carry their own.

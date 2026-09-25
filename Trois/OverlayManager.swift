@@ -11,7 +11,7 @@ enum AXQueue {
         // process makes, including ones on window and button elements. A hung
         // app then holds the queue for this long instead of the 6s default.
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
-        return DispatchQueue(label: "Trois.ax", qos: .userInteractive)
+        return DispatchQueue(label: "com.trois.app.ax", qos: .userInteractive)
     }()
 
     static func async(_ work: @escaping () -> Void) {

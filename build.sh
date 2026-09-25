@@ -24,8 +24,8 @@ echo "Building TroisInjector..."
 "$INJECTOR_DIR/build.sh"
 
 echo "Building Trois..."
-xcodebuild -project "$PROJECT_DIR/Eppie.xcodeproj" \
-    -scheme Eppie \
+xcodebuild -project "$PROJECT_DIR/Trois.xcodeproj" \
+    -scheme Trois \
     -configuration Release \
     -derivedDataPath "$BUILD_DIR" \
     clean build 2>&1 | { grep -E "(error:|warning:|BUILD)" || true; }
@@ -52,7 +52,7 @@ cp "$INJECTOR_DIR/com.trois.app.Injector" "$LAUNCH_SERVICES_PATH/"
 echo "Signing..."
 codesign --force --options runtime --sign "$IDENTITY" "$RESOURCES_PATH/TroisLoader.bundle"
 codesign --force --options runtime --sign "$IDENTITY" \
-    --entitlements "$PROJECT_DIR/Eppie/Trois.entitlements" \
+    --entitlements "$PROJECT_DIR/Trois/Trois.entitlements" \
     "$APP_PATH"
 codesign --verify --strict "$APP_PATH"
 
