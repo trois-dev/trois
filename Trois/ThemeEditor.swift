@@ -312,7 +312,7 @@ struct ThemeEditorView: View {
     private func states(for part: EditorPart) -> [PreviewState] {
         switch part {
         case .theme, .button: return PreviewState.allCases
-        case .frame, .edge, .box: return frame?.k1 == nil ? [.active, .pressed, .inactive] : [.active, .inactive]
+        case .frame, .edge, .box: return frame?.fixedLayout != true ? [.active, .pressed, .inactive] : [.active, .inactive]
         case .title: return [.active, .inactive]
         }
     }
@@ -327,7 +327,7 @@ struct ThemeEditorView: View {
     private func fitSelection() {
         switch selection {
         case .edge, .box:
-            if frame == nil || frame?.k1 != nil { selection = .frame }
+            if frame == nil || frame?.fixedLayout == true { selection = .frame }
         default:
             break
         }
@@ -414,7 +414,7 @@ struct ThemeEditorView: View {
     // Slices only edits frames with a layout, and only while the frame or
     // one of its edges is selected.
     private var showsSlices: Bool {
-        guard canvasMode == .slices, let frame, frame.k1 == nil else { return false }
+        guard canvasMode == .slices, let frame, !frame.fixedLayout else { return false }
         switch selection {
         case .frame, .edge, .box: return true
         case .theme, .button, .title: return false
@@ -422,7 +422,7 @@ struct ThemeEditorView: View {
     }
 
     private var canvasToggleShown: Bool {
-        guard let frame, frame.k1 == nil else { return false }
+        guard let frame, !frame.fixedLayout else { return false }
         switch selection {
         case .frame, .edge, .box: return true
         case .theme, .button, .title: return false
@@ -651,7 +651,7 @@ struct ThemeEditorView: View {
         }
         if rendered != nil, g.visible.contains(point), !g.window.contains(point) {
             // Top and bottom draw over the sides, so they own the corners.
-            guard frame?.k1 == nil else { return .frame }
+            guard frame?.fixedLayout != true else { return .frame }
             if point.y < g.window.minY { return .edge(.top) }
             if point.y >= g.window.maxY { return .edge(.bottom) }
             return .edge(point.x < g.window.minX ? .left : .right)
@@ -813,7 +813,7 @@ struct ThemeEditorView: View {
                     .foregroundColor(.secondary)
             }
         case .edge(let side):
-            if let frame, frame.k1 == nil {
+            if let frame, !frame.fixedLayout {
                 EdgeInspector(side: side, frame: previewFrame ?? frame, selected: $selectedRun,
                               selectSide: { selection = .edge($0) },
                               changed: themeManager.draftEdgeRunsChanged(side),
@@ -823,7 +823,7 @@ struct ThemeEditorView: View {
                 frameInspector
             }
         case .box(let box):
-            if let frame, frame.k1 == nil {
+            if let frame, !frame.fixedLayout {
                 BoxInspector(box: box, frame: previewFrame ?? frame, selectBox: { selection = .box($0) },
                              baseline: themeManager.baselineBoxes(), commit: commitBoxes)
             } else {
@@ -888,7 +888,7 @@ struct ThemeEditorView: View {
         if let directory = themeManager.draftFrameDirectory {
             HStack(spacing: 16) {
                 // 1.x frames have no pressed strip.
-                ForEach(ThemeManager.FrameArt.allCases.filter { $0 != .pressed || frame?.k1 == nil }, id: \.self) { art in
+                ForEach(ThemeManager.FrameArt.allCases.filter { $0 != .pressed || frame?.fixedLayout != true }, id: \.self) { art in
                     FrameArtSlot(art: art, url: directory.appendingPathComponent(art.fileName),
                                  isGenerated: themeManager.isFrameArtGenerated(art),
                                  revision: revision, report: report)
@@ -897,7 +897,7 @@ struct ThemeEditorView: View {
                 VStack(alignment: .trailing, spacing: 8) {
                     FrameSourceMenu(picked: useFrame)
                     HStack {
-                        if frame?.k1 == nil {
+                        if frame?.fixedLayout != true {
                             Menu("Edit Layout") {
                                 Section("Edges") {
                                     ForEach(WindowFrame.Side.allCases, id: \.self) { side in
@@ -1950,8 +1950,8 @@ private struct TitleInspector: View {
                     .labelsHidden()
                     .fixedSize()
                     // 2.x titles get a section just wide enough for the text, so only 1.x bars leave room to align in.
-                    .disabled(frame.k1 == nil && style.alignment == nil)
-                    .help(frame.k1 == nil ? "2.x frames size the title's section to the text, so it stays centered"
+                    .disabled(!frame.fixedLayout && style.alignment == nil)
+                    .help(!frame.fixedLayout ? "2.x frames size the title's section to the text, so it stays centered"
                                           : "Where the title sits in its space")
                 }
             }

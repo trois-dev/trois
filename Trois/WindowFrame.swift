@@ -4,7 +4,8 @@ import Cocoa
 /// A Kaleidoscope 2 document window: the active, inactive and pressed-widget
 /// images plus the wnd# layout that says how to stretch them. Read from a
 /// theme's `frame/` folder (see kaleidoscope/tools/convert.py). A layout.json
-/// of {"format": "k1"} marks a 1.x scheme instead, drawn by WindowFrameK1.swift.
+/// of {"format": "k1"} marks a 1.x scheme instead, drawn by WindowFrameK1.swift,
+/// and {"format": "wb"} a WindowBlinds skin, drawn by WindowFrameWB.swift.
 ///
 /// All coordinates are image pixels with a top-left origin. One pixel draws as
 /// one point, the size these were made for.
@@ -35,14 +36,20 @@ struct WindowFrame {
     private(set) var right: [(Int, Int)]
     // Set for 1.x schemes, which follow fixed rules instead of a layout.
     let k1: K1Parts?
+    // Set for WindowBlinds skins, drawn from separate edge images.
+    let wb: WBParts?
     // layout.json's "title" object.
     private(set) var titleStyle = TitleStyle()
 
     var content: CGRect { rects[0] ?? CGRect(origin: .zero, size: size) }
 
+    /// Frames whose layout follows fixed rules instead of editable rects and runs.
+    var fixedLayout: Bool { k1 != nil || wb != nil }
+
     /// Space the frame adds around a window, in points.
     var insets: NSEdgeInsets {
         if k1 != nil { return Self.k1Insets }
+        if let wb { return wb.insets }
         return NSEdgeInsets(top: content.minY, left: content.minX,
                      bottom: size.height - content.maxY, right: size.width - content.maxX)
     }
@@ -53,10 +60,24 @@ struct WindowFrame {
             return CGImageSourceCreateImageAtIndex(source, 0, nil)
         }
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("layout.json")),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let active = image("active.png") else { return nil }
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         self.directory = directory
         titleStyle = TitleStyle(json: json["title"] as? [String: Any] ?? [:])
+        if json["format"] as? String == "wb" {
+            guard let parts = Self.loadWBParts(json: json, image: image), let topEdge = parts.edges[.top] else { return nil }
+            wb = parts
+            k1 = nil
+            // The top edge stands in for the whole frame where one image is wanted.
+            active = topEdge.active
+            inactive = topEdge.inactive
+            pressed = nil
+            size = CGSize(width: topEdge.active.width, height: topEdge.active.height)
+            rects = [:]
+            top = []; bottom = []; left = []; right = []
+            return
+        }
+        wb = nil
+        guard let active = image("active.png") else { return nil }
         if json["format"] as? String == "k1" {
             guard active.width == 16, active.height == 16 else { return nil }
             self.active = active
@@ -203,7 +224,7 @@ struct WindowFrame {
         let url = directory.appendingPathComponent("layout.json")
         guard let data = try? Data(contentsOf: url),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              json["format"] as? String != "k1",
+              !["k1", "wb"].contains(json["format"] as? String ?? ""),
               var layout = json["layout"] as? [String: Any] else { return false }
         var entries = layout["rects"] as? [[Any]] ?? []
         func code(_ entry: [Any]) -> Int? { entry.first as? Int }
@@ -377,7 +398,7 @@ struct WindowFrame {
         let url = directory.appendingPathComponent("layout.json")
         guard let data = try? Data(contentsOf: url),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              json["format"] as? String != "k1",
+              !["k1", "wb"].contains(json["format"] as? String ?? ""),
               var layout = json["layout"] as? [String: Any] else { return false }
         layout[side.rawValue] = runs.map { [$0.0, $0.1] }
         json["layout"] = layout
@@ -760,6 +781,10 @@ struct WindowFrame {
     /// the window has whose buttons draw elsewhere, at the traffic lights.
     func render(windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>, hidden: Set<Widget> = [],
                 title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat) -> (CGImage, Layout)? {
+        if let wb {
+            return renderWB(wb, windowSize: windowSize, active: isActive, widgets: widgets, hidden: hidden, title: title,
+                            pressedWidget: pressedWidget, cornerRadius: cornerRadius, scale: scale)
+        }
         if let k1 {
             return renderK1(k1, windowSize: windowSize, active: isActive, widgets: widgets, title: title,
                             pressedWidget: pressedWidget, cornerRadius: cornerRadius, scale: scale)
@@ -960,7 +985,8 @@ struct WindowFrame {
 
     /// The title's look for the active or inactive window, style applied.
     func title(active: Bool) -> ResolvedTitle {
-        k1 != nil ? k1Title(active ? self.active : inactive, active: active) : resolvedTitle(active: active)
+        if wb != nil { return wbTitle(active: active) }
+        return k1 != nil ? k1Title(active ? self.active : inactive, active: active) : resolvedTitle(active: active)
     }
 
     // Kaleidoscope 2.3.1 (PowerPC kDEF 1, 0x560c) takes the title color from

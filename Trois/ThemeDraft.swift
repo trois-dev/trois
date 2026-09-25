@@ -384,7 +384,7 @@ extension ThemeManager {
         guard let directory = draftFrameDirectory, let frame = WindowFrame(directory: directory) else {
             return "This theme has no window frame."
         }
-        guard frame.k1 == nil else { return "1.x frames have a fixed layout." }
+        guard !frame.fixedLayout else { return "This frame has a fixed layout." }
         if let error = WindowFrame.runError(runs, extent: frame.extent(side)) { return error }
         recordDraftEdit()
         saveLayoutBaseline()
@@ -401,7 +401,7 @@ extension ThemeManager {
         guard let directory = draftFrameDirectory, let old = WindowFrame(directory: directory) else {
             return "This theme has no window frame."
         }
-        guard old.k1 == nil else { return "1.x frames have a fixed layout." }
+        guard !old.fixedLayout else { return "This frame has a fixed layout." }
         if changes[.content] == .some(nil) { return "A frame needs a content box." }
         var boxes: [WindowFrame.Box: CGRect] = [:]
         for box in WindowFrame.Box.allCases {
@@ -527,12 +527,13 @@ extension ThemeManager {
             return [DraftCheck(id: "layout", message: "The frame's layout doesn't fit its active image, so the frame won't draw.", fixes: [])]
         }
         var checks: [DraftCheck] = []
-        if frameImage(.inactive) == nil {
+        // WindowBlinds frames keep their art per edge, not in these images.
+        if frame.wb == nil, frameImage(.inactive) == nil {
             checks.append(DraftCheck(id: "inactive", message: "No inactive frame image. Inactive windows use the active one.",
                                      fixes: [("Generate", .generateFrameArt(.inactive))]))
         }
         let need = frame.pressedStripSize
-        if need.width > 0 {
+        if frame.wb == nil, need.width > 0 {
             if let pressed = frameImage(.pressed) {
                 if CGFloat(pressed.width) < need.width || CGFloat(pressed.height) < need.height {
                     checks.append(DraftCheck(
@@ -546,7 +547,7 @@ extension ThemeManager {
             }
         }
 
-        if frame.k1 == nil {
+        if !frame.fixedLayout {
             for side in WindowFrame.Side.allCases {
                 for (n, issue) in frame.runIssues(side).enumerated() {
                     // Only offered when there's room for the box to start in.
@@ -729,7 +730,7 @@ extension ThemeManager {
     /// Makes the inactive image or pressed strip from the active image, then
     /// paints the draft's own disabled or pressed buttons over it.
     private func makeFrameArt(_ art: FrameArt, manifest: inout ThemeManifest) {
-        guard let directory = draftFrameDirectory, let frame = WindowFrame(directory: directory),
+        guard let directory = draftFrameDirectory, let frame = WindowFrame(directory: directory), frame.wb == nil,
               let image = derivedFrameArt(art, frame: frame, active: frame.active) else { return }
         guard PixelOps.writePNG(image, to: directory.appendingPathComponent(art.fileName)) else { return }
         markGenerated(art.generatedKey, in: &manifest)
@@ -765,7 +766,7 @@ extension ThemeManager {
     /// Paints the listed button images into the frame art. Inactive and
     /// pressed art that's missing is generated first.
     private func pushToFrame(_ keys: [String], manifest: inout ThemeManifest) {
-        guard let directory = draftFrameDirectory else { return }
+        guard let directory = draftFrameDirectory, WindowFrame(directory: directory)?.wb == nil else { return }
         let mirrors = Self.frameMirrors.filter { keys.contains($0.key) && manifest.buttons?[$0.key] != nil }
         guard !mirrors.isEmpty else { return }
         for art in [FrameArt.inactive, .pressed] where frameImage(art) == nil && mirrors.contains(where: { $0.art == art }) {
