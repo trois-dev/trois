@@ -985,10 +985,6 @@ struct AboutView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .sheet(isPresented: $showsCredits) { CreditsView() }
     }
-
-    private func feature(_ title: String, _ detail: String) -> some View {
-        (Text(title).bold() + Text(" \(detail)"))
-    }
 }
 
 // Theme authors and the archives themes come from. Add an archive when a new source lands.
