@@ -49,6 +49,8 @@ enum EditorPart: Hashable {
     case title
     // One edge list of a frame, for editing its runs.
     case edge(WindowFrame.Side)
+    // One of a frame's layout boxes: content, a widget or the title.
+    case box(WindowFrame.Box)
 }
 
 enum PreviewState: String, CaseIterable, Identifiable {
@@ -286,10 +288,14 @@ struct ThemeEditorView: View {
         .onChange(of: state) { _ in fitState() }
     }
 
-    // An edge shows as the Frame segment.
+    // An edge or box shows as the Frame segment.
     private var partBinding: Binding<EditorPart> {
-        Binding(get: { if case .edge = selection { return .frame }; return selection },
-                set: { selection = $0 })
+        Binding(get: {
+            switch selection {
+            case .edge, .box: return .frame
+            default: return selection
+            }
+        }, set: { selection = $0 })
     }
 
     private func select(_ side: WindowFrame.Side, run: Int) {
@@ -306,7 +312,7 @@ struct ThemeEditorView: View {
     private func states(for part: EditorPart) -> [PreviewState] {
         switch part {
         case .theme, .button: return PreviewState.allCases
-        case .frame, .edge: return frame?.k1 == nil ? [.active, .pressed, .inactive] : [.active, .inactive]
+        case .frame, .edge, .box: return frame?.k1 == nil ? [.active, .pressed, .inactive] : [.active, .inactive]
         case .title: return [.active, .inactive]
         }
     }
@@ -317,9 +323,14 @@ struct ThemeEditorView: View {
         if !availableStates.contains(state) { state = .active }
     }
 
-    // Edges only exist on frames with a layout.
+    // Edges and boxes only exist on frames with a layout.
     private func fitSelection() {
-        if case .edge = selection, frame == nil || frame?.k1 != nil { selection = .frame }
+        switch selection {
+        case .edge, .box:
+            if frame == nil || frame?.k1 != nil { selection = .frame }
+        default:
+            break
+        }
         fitState()
     }
 
@@ -405,7 +416,7 @@ struct ThemeEditorView: View {
     private var showsSlices: Bool {
         guard canvasMode == .slices, let frame, frame.k1 == nil else { return false }
         switch selection {
-        case .frame, .edge: return true
+        case .frame, .edge, .box: return true
         case .theme, .button, .title: return false
         }
     }
@@ -413,7 +424,7 @@ struct ThemeEditorView: View {
     private var canvasToggleShown: Bool {
         guard let frame, frame.k1 == nil else { return false }
         switch selection {
-        case .frame, .edge: return true
+        case .frame, .edge, .box: return true
         case .theme, .button, .title: return false
         }
     }
@@ -441,11 +452,14 @@ struct ThemeEditorView: View {
     private func slices(_ frame: WindowFrame) -> some View {
         let shown = previewFrame ?? frame
         let side: WindowFrame.Side? = { if case .edge(let s) = selection { return s }; return nil }()
+        let box: WindowFrame.Box? = { if case .box(let b) = selection { return b }; return nil }()
         let size = CanvasGeometry(bounds: CGSize(width: 4000, height: 4000), requested: windowSize, insets: shown.insets).window.size
         return SlicesView(frame: frame, shown: shown, selectedSide: side, selectedRun: selectedRun,
                           inactive: state == .inactive, thumbnail: rendered(shown, windowSize: size),
+                          selectedBox: box, selectBox: { selection = .box($0) },
                           select: { select($0, run: $1) }, preview: { previewFrame = $0 },
-                          commit: { commit($0, side: $1) }, showPreview: { canvasMode = .preview })
+                          commit: { commit($0, side: $1) }, commitBoxes: commitBoxes,
+                          showPreview: { canvasMode = .preview })
             .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                 loadDroppedFile(providers) { url in drop(url, on: selection) }
             }
@@ -525,6 +539,9 @@ struct ThemeEditorView: View {
             }
         case .edge(let side):
             if rendered != nil { rects.append(band(side, g).insetBy(dx: -1, dy: -1)) }
+        case .box:
+            // Boxes are image positions, shown in the slices view.
+            break
         case .button(let button):
             if let placed = placedButtons(in: g).first(where: { $0.button == button }) {
                 rects.append(placed.rect.insetBy(dx: -2, dy: -2))
@@ -705,7 +722,7 @@ struct ThemeEditorView: View {
             break
         case .button(let button):
             report(themeManager.setDraftImage(url, forKey: button.key(state.buttonSuffix)))
-        case .frame, .edge:
+        case .frame, .edge, .box:
             report(themeManager.setDraftFrameArt(url, for: state.frameArt))
         }
     }
@@ -720,6 +737,21 @@ struct ThemeEditorView: View {
         if let problem = themeManager.setDraftEdgeRuns(runs, for: side) {
             previewFrame = nil
             report(problem)
+        }
+    }
+
+    // MARK: - Box edits
+
+    private func commitBoxes(_ changes: [WindowFrame.Box: CGRect?]) {
+        guard let frame else { return }
+        let real = changes.filter { frame.rects[$0.key.rawValue] != $0.value }
+        guard !real.isEmpty else {
+            previewFrame = nil
+            return
+        }
+        if let problem = themeManager.setDraftBoxes(real) {
+            previewFrame = nil
+            alert = ("Layout Not Changed", problem)
         }
     }
 
@@ -787,6 +819,13 @@ struct ThemeEditorView: View {
                               changed: themeManager.draftEdgeRunsChanged(side),
                               revert: { themeManager.revertDraftEdgeRuns(side) },
                               commit: { commit($0, side: side) })
+            } else {
+                frameInspector
+            }
+        case .box(let box):
+            if let frame, frame.k1 == nil {
+                BoxInspector(box: box, frame: previewFrame ?? frame, selectBox: { selection = .box($0) },
+                             baseline: themeManager.baselineBoxes(), commit: commitBoxes)
             } else {
                 frameInspector
             }
@@ -859,16 +898,26 @@ struct ThemeEditorView: View {
                     FrameSourceMenu(picked: useFrame)
                     HStack {
                         if frame?.k1 == nil {
-                            Menu("Edit Edge") {
-                                ForEach(WindowFrame.Side.allCases, id: \.self) { side in
-                                    Button(side.rawValue.capitalized) {
-                                        canvasMode = .slices
-                                        selection = .edge(side)
+                            Menu("Edit Layout") {
+                                Section("Edges") {
+                                    ForEach(WindowFrame.Side.allCases, id: \.self) { side in
+                                        Button(side.rawValue.capitalized) {
+                                            canvasMode = .slices
+                                            selection = .edge(side)
+                                        }
+                                    }
+                                }
+                                Section("Boxes") {
+                                    ForEach(WindowFrame.Box.allCases, id: \.self) { box in
+                                        Button(frame?.rect(box) == nil ? "\(box.name) (none)" : box.name) {
+                                            canvasMode = .slices
+                                            selection = .box(box)
+                                        }
                                     }
                                 }
                             }
                             .fixedSize()
-                            .help("Change how each edge's art is cut and drawn")
+                            .help("Change how each edge's art is cut, and where the content, buttons and title sit")
                         }
                         Menu("Buttons") {
                             Button("Take Buttons from Frame") { themeManager.takeButtonsFromFrame() }
@@ -1285,21 +1334,32 @@ private struct SlicesView: View {
     let selectedRun: Int
     let inactive: Bool
     let thumbnail: RenderedFrame?
+    let selectedBox: WindowFrame.Box?
+    let selectBox: (WindowFrame.Box) -> Void
     let select: (WindowFrame.Side, Int) -> Void
     let preview: (WindowFrame?) -> Void
     let commit: ([(Int, Int)], WindowFrame.Side) -> Void
+    let commitBoxes: ([WindowFrame.Box: CGRect?]) -> Void
     let showPreview: () -> Void
+
+    // Which edges of a box a drag moves. Empty moves the whole box.
+    private struct Handle: OptionSet, Hashable {
+        let rawValue: Int
+        static let left = Handle(rawValue: 1), right = Handle(rawValue: 2)
+        static let top = Handle(rawValue: 4), bottom = Handle(rawValue: 8)
+    }
 
     private enum Hit {
         // Every run ending at the guide; zero-length runs can share one.
         case guide(WindowFrame.Side, [Int])
         case region(WindowFrame.Side, Int, pixel: Int)
+        case box(WindowFrame.Box, Handle)
+    }
 
-        var side: WindowFrame.Side {
-            switch self {
-            case .guide(let side, _), .region(let side, _, _): return side
-            }
-        }
+    private struct BoxDrag {
+        let box: WindowFrame.Box
+        let handle: Handle
+        let start: CGRect
     }
 
     private struct Drag {
@@ -1311,6 +1371,7 @@ private struct SlicesView: View {
 
     @State private var hover: CGPoint?
     @State private var drag: Drag?
+    @State private var boxDrag: BoxDrag?
     @State private var cursorPushed = false
     @State private var keys = SliceKeys()
     // The arrow key whose release commits a nudge.
@@ -1378,6 +1439,29 @@ private struct SlicesView: View {
     private func hit(_ point: CGPoint, _ g: SlicesGeometry) -> Hit? {
         let p = g.position(point)
         let reach = max(3, g.zoom / 2) / g.zoom
+        // A picked box takes the mouse; otherwise runs come first and a box
+        // only answers on its border, so the runs under it stay clickable.
+        if let selectedBox, let hit = boxHit(selectedBox, p, reach: reach, inside: true) { return hit }
+        if let hit = runHit(p, reach: reach) { return hit }
+        for box in boxOrder {
+            if let hit = boxHit(box, p, reach: reach, inside: false) { return hit }
+        }
+        return nil
+    }
+
+    // Small boxes first, so they win over the content box around them.
+    private var boxOrder: [WindowFrame.Box] { [.close, .zoom, .collapse, .title, .content] }
+
+    private func boxHit(_ box: WindowFrame.Box, _ p: CGPoint, reach: CGFloat, inside: Bool) -> Hit? {
+        guard let r = shown.rect(box), r.insetBy(dx: -reach, dy: -reach).contains(p) else { return nil }
+        var handle: Handle = []
+        if abs(p.x - r.minX) <= reach { handle.insert(.left) } else if abs(p.x - r.maxX) <= reach { handle.insert(.right) }
+        if abs(p.y - r.minY) <= reach { handle.insert(.top) } else if abs(p.y - r.maxY) <= reach { handle.insert(.bottom) }
+        if !handle.isEmpty || inside { return .box(box, handle) }
+        return nil
+    }
+
+    private func runHit(_ p: CGPoint, reach: CGFloat) -> Hit? {
         for side in order {
             let band = frame.band(side)
             guard band.insetBy(dx: side.horizontal ? -reach : 0, dy: side.horizontal ? 0 : -reach).contains(p) else { continue }
@@ -1398,6 +1482,23 @@ private struct SlicesView: View {
         return nil
     }
 
+    /// `start` with the drag applied, in whole pixels, kept inside the image
+    /// and at least a pixel across.
+    private func dragged(_ start: CGRect, _ handle: Handle, dx: Int, dy: Int) -> CGRect {
+        let width = Int(frame.size.width), height = Int(frame.size.height)
+        var minX = Int(start.minX), minY = Int(start.minY), maxX = Int(start.maxX), maxY = Int(start.maxY)
+        if handle.isEmpty {
+            let x = min(max(dx, -minX), width - maxX), y = min(max(dy, -minY), height - maxY)
+            minX += x; maxX += x; minY += y; maxY += y
+        } else {
+            if handle.contains(.left) { minX = min(max(0, minX + dx), maxX - 1) }
+            if handle.contains(.right) { maxX = max(min(width, maxX + dx), minX + 1) }
+            if handle.contains(.top) { minY = min(max(0, minY + dy), maxY - 1) }
+            if handle.contains(.bottom) { maxY = max(min(height, maxY + dy), minY + 1) }
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
     // MARK: Drawing
 
     private func draw(_ context: GraphicsContext, _ g: SlicesGeometry) {
@@ -1409,6 +1510,37 @@ private struct SlicesView: View {
         }
         if let side = selectedSide {
             drawRuns(side, context, g, emphasized: true)
+        }
+        drawBoxes(context, g)
+    }
+
+    private static func tint(_ box: WindowFrame.Box) -> Color {
+        switch box {
+        case .content: return .white
+        case .close: return .red
+        case .zoom: return .green
+        case .collapse: return .yellow
+        case .title: return .blue
+        }
+    }
+
+    // Dashed outlines, the picked box solid with its corners marked.
+    private func drawBoxes(_ context: GraphicsContext, _ g: SlicesGeometry) {
+        for box in boxOrder.reversed() {
+            guard let rect = shown.rect(box) else { continue }
+            let r = g.rect(rect)
+            let picked = box == selectedBox
+            let color = picked ? Color.accentColor : Self.tint(box).opacity(0.9)
+            context.stroke(Path(r), with: .color(color),
+                           style: StrokeStyle(lineWidth: picked ? 2 : 1, dash: picked ? [] : [4, 3]))
+            if picked {
+                for corner in [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
+                               CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY)] {
+                    let knob = CGRect(x: corner.x - 3, y: corner.y - 3, width: 6, height: 6)
+                    context.fill(Path(knob), with: .color(.white))
+                    context.stroke(Path(knob), with: .color(.accentColor), lineWidth: 1)
+                }
+            }
         }
     }
 
@@ -1506,6 +1638,11 @@ private struct SlicesView: View {
         case .region(let side, let i, _):
             let runs = shown.runs(side)
             text += "  \(side.rawValue.capitalized) run \(i + 1): \(RunMode.name(runs[i].0)), \(RunEdit.start(runs, i))-\(runs[i].1)"
+        case .box(let box, let handle):
+            if let r = shown.rect(box) {
+                let action = handle.isEmpty ? "Drag to move" : "Drag to resize"
+                text += "  \(box.name) box \(Int(r.minX)), \(Int(r.minY)), \(Int(r.width)) x \(Int(r.height)). \(action)"
+            }
         case nil:
             break
         }
@@ -1534,6 +1671,9 @@ private struct SlicesView: View {
     }
 
     @ViewBuilder private func contextMenu(_ hit: Hit?) -> some View {
+        if case .box(let box, _) = hit, box != .content {
+            Button("Remove \(box.name) Box") { commitBoxes([box: nil]) }
+        }
         if case .region(let side, let i, let pixel) = hit {
             let runs = frame.runs(side)
             let start = RunEdit.start(runs, i)
@@ -1561,6 +1701,17 @@ private struct SlicesView: View {
     private func gesture(_ g: SlicesGeometry) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                if drag == nil && boxDrag == nil, case .box(let box, let handle) = hit(value.startLocation, g),
+                   let rect = frame.rect(box) {
+                    boxDrag = BoxDrag(box: box, handle: handle, start: rect)
+                    if box != selectedBox { selectBox(box) }
+                }
+                if let b = boxDrag {
+                    let dx = Int((value.translation.width / g.zoom).rounded())
+                    let dy = Int((value.translation.height / g.zoom).rounded())
+                    preview(frame.with([b.box: dragged(b.start, b.handle, dx: dx, dy: dy)]))
+                    return
+                }
                 if drag == nil {
                     guard case .guide(let side, let runs) = hit(value.startLocation, g) else { return }
                     drag = Drag(side: side, candidates: runs, run: runs.count == 1 ? runs[0] : nil,
@@ -1580,6 +1731,11 @@ private struct SlicesView: View {
                 preview(frame.with(d.side, runs: runs))
             }
             .onEnded { value in
+                if let b = boxDrag {
+                    boxDrag = nil
+                    commitBoxes([b.box: shown.rect(b.box)])
+                    return
+                }
                 if let d = drag {
                     drag = nil
                     if let i = d.run {
@@ -1600,6 +1756,13 @@ private struct SlicesView: View {
     private func updateCursor(_ hit: Hit?) {
         var cursor: NSCursor?
         if case .guide(let side, _) = hit { cursor = side.horizontal ? .resizeLeftRight : .resizeUpDown }
+        if case .box(_, let handle) = hit {
+            // No diagonal resize cursor in AppKit; corners get the crosshair.
+            if handle.isEmpty { cursor = .openHand }
+            else if handle.isSubset(of: [.left, .right]) { cursor = .resizeLeftRight }
+            else if handle.isSubset(of: [.top, .bottom]) { cursor = .resizeUpDown }
+            else { cursor = .crosshair }
+        }
         if cursorPushed { NSCursor.pop() }
         cursorPushed = cursor != nil
         cursor?.push()
@@ -1611,6 +1774,7 @@ private struct SlicesView: View {
     // and a held key makes one edit. Arrows across it, and Tab, pick the
     // next or previous run. Delete gives the run to the one before it.
     private func handleKey(_ event: NSEvent) -> Bool {
+        if let box = selectedBox { return handleBoxKey(event, box) }
         guard let side = selectedSide, !(event.window?.firstResponder is NSText),
               event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return false }
         let runs = frame.runs(side)
@@ -1643,6 +1807,101 @@ private struct SlicesView: View {
             return false
         }
         return true
+    }
+
+    // Arrows move the picked box, 10 px with Shift, and a held key makes one
+    // edit. Delete removes it, except the content box.
+    private func handleBoxKey(_ event: NSEvent, _ box: WindowFrame.Box) -> Bool {
+        guard !(event.window?.firstResponder is NSText),
+              event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
+              let rect = shown.rect(box) else { return false }
+        if event.type == .keyUp {
+            guard event.keyCode == nudgeKey else { return false }
+            nudgeKey = nil
+            commitBoxes([box: shown.rect(box)])
+            return true
+        }
+        let step = event.modifierFlags.contains(.shift) ? 10 : 1
+        let moves: [UInt16: (Int, Int)] = [123: (-step, 0), 124: (step, 0), 125: (0, step), 126: (0, -step)]
+        if let (dx, dy) = moves[event.keyCode] {
+            nudgeKey = event.keyCode
+            preview(frame.with([box: dragged(rect, [], dx: dx, dy: dy)]))
+            return true
+        }
+        if [51, 117].contains(event.keyCode), box != .content {
+            if !event.isARepeat { commitBoxes([box: nil]) }
+            return true
+        }
+        return false
+    }
+}
+
+// Where one layout box sits in the frame image, with Add, Remove and Revert.
+private struct BoxInspector: View {
+    let box: WindowFrame.Box
+    // The frame as drawn, a drag or nudge in progress included.
+    let frame: WindowFrame
+    let selectBox: (WindowFrame.Box) -> Void
+    // Boxes as they came with the frame, when they've changed since.
+    let baseline: [WindowFrame.Box: CGRect?]?
+    let commit: ([WindowFrame.Box: CGRect?]) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Picker("Box", selection: Binding(get: { box }, set: selectBox)) {
+                    ForEach(WindowFrame.Box.allCases, id: \.self) { Text($0.name).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                Text("\(Int(frame.size.width)) x \(Int(frame.size.height)) px image")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button("Revert Boxes") { if let baseline { commit(baseline) } }
+                    .disabled(baseline == nil)
+                    .help("Put every box back as it was when the frame came in")
+            }
+            if let rect = frame.rect(box) {
+                HStack(spacing: 12) {
+                    field("X", rect.minX) { commit([box: CGRect(x: $0, y: rect.minY, width: rect.width, height: rect.height)]) }
+                    field("Y", rect.minY) { commit([box: CGRect(x: rect.minX, y: $0, width: rect.width, height: rect.height)]) }
+                    field("W", rect.width) { commit([box: CGRect(x: rect.minX, y: rect.minY, width: $0, height: rect.height)]) }
+                    field("H", rect.height) { commit([box: CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: $0)]) }
+                    Spacer()
+                    if box != .content {
+                        Button("Remove Box") { commit([box: nil]) }
+                            .help("Take the \(box.name.lowercased()) box out of the layout")
+                    }
+                }
+            } else {
+                HStack(spacing: 12) {
+                    Text(frame.missingBoxes.contains(box)
+                         ? "No \(box.name.lowercased()) box, but an edge has runs for one."
+                         : "This frame has no \(box.name.lowercased()) box.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    let start = frame.startingRect(for: box)
+                    Button("Add Box") { if let start { commit([box: start]) } }
+                        .disabled(start == nil)
+                        .help(start == nil ? "There's no room above the content. Make the top band taller first"
+                                           : "Add one in the top band, then drag it into place")
+                }
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func field(_ label: String, _ value: CGFloat, _ set: @escaping (CGFloat) -> Void) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+            TextField(label, value: Binding(get: { Int(value) }, set: { set(CGFloat($0)) }), format: .number)
+                .labelsHidden()
+                .frame(width: 48)
+                .monospacedDigit()
+        }
     }
 }
 

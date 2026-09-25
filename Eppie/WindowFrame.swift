@@ -27,7 +27,7 @@ struct WindowFrame {
     let pressed: CGImage?
     let size: CGSize
     // Rectangle codes to rects: 0 content, 1 close, 2 zoom, 3 collapse, 4 title text.
-    let rects: [Int: CGRect]
+    private(set) var rects: [Int: CGRect]
     // Edge lists as (part code, cumulative end offset).
     private(set) var top: [(Int, Int)]
     private(set) var bottom: [(Int, Int)]
@@ -143,6 +143,123 @@ struct WindowFrame {
         return (source, horizontal)
     }
 
+    // MARK: - Boxes
+
+    /// The layout's rects, as the editor names them. Raw values are rect codes.
+    enum Box: Int, CaseIterable {
+        case content = 0, close = 1, zoom = 2, collapse = 3, title = 4
+
+        var name: String {
+            switch self {
+            case .content: return "Content"
+            case .close: return "Close"
+            case .zoom: return "Zoom"
+            case .collapse: return "Minimize"
+            case .title: return "Title"
+            }
+        }
+
+        var widget: Widget? { Widget(rawValue: rawValue) }
+    }
+
+    /// A box's rect, if the layout has a usable one. Some schemes list a
+    /// widget with an empty rect when they don't have it.
+    func rect(_ box: Box) -> CGRect? {
+        rects[box.rawValue].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// A copy with other boxes, for previewing edits unsaved. Nil removes one.
+    func with(_ boxes: [Box: CGRect?]) -> WindowFrame {
+        var copy = self
+        for (box, rect) in boxes { copy.rects[box.rawValue] = rect }
+        copy.identity = UUID()
+        return copy
+    }
+
+    /// Why these boxes can't be the layout's, if they can't. Follows what
+    /// drawing needs: widgets and the title are placed from the edge they
+    /// sit on, and only the top edge draws a title.
+    func boxError(_ boxes: [Box: CGRect]) -> String? {
+        let image = CGRect(origin: .zero, size: size)
+        guard let content = boxes[.content], !content.isEmpty else { return "A frame needs a content box." }
+        for (box, rect) in boxes {
+            if rect.isEmpty { return "The \(box.name.lowercased()) box has no size." }
+            if !image.contains(rect) {
+                return "The \(box.name.lowercased()) box runs past the image (\(Int(size.width)) x \(Int(size.height)) px)."
+            }
+            guard box != .content else { continue }
+            guard let side = Self.side(of: rect, content: content) else {
+                return "The \(box.name.lowercased()) box has to sit on an edge, outside the content."
+            }
+            if box == .title && side != .top { return "Titles only draw on the top edge." }
+        }
+        return nil
+    }
+
+    /// Writes the boxes into layout.json. A box that changed replaces the
+    /// layout's entry for it, the last one when a scheme lists duplicates, as
+    /// that's the one reading uses. Other entries stay as they are.
+    static func writeBoxes(_ boxes: [Box: CGRect?], in directory: URL) -> Bool {
+        let url = directory.appendingPathComponent("layout.json")
+        guard let data = try? Data(contentsOf: url),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["format"] as? String != "k1",
+              var layout = json["layout"] as? [String: Any] else { return false }
+        var entries = layout["rects"] as? [[Any]] ?? []
+        func code(_ entry: [Any]) -> Int? { entry.first as? Int }
+        for (box, rect) in boxes.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
+            guard let rect else {
+                entries.removeAll { code($0) == box.rawValue }
+                continue
+            }
+            // wnd# rects are (top, left, bottom, right) grid lines.
+            let entry: [Any] = [box.rawValue, [Int(rect.minY), Int(rect.minX), Int(rect.maxY), Int(rect.maxX)]]
+            if let last = entries.lastIndex(where: { code($0) == box.rawValue }) {
+                entries[last] = entry
+            } else {
+                entries.append(entry)
+            }
+        }
+        layout["rects"] = entries
+        json["layout"] = layout
+        guard let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return false }
+        return (try? out.write(to: url, options: .atomic)) != nil
+    }
+
+    /// Where a new box starts, in the top band: widgets as squares up to 16
+    /// px, close at the left end, zoom and minimize at the right, the title
+    /// across the middle. Nil when there's no room above the content.
+    func startingRect(for box: Box) -> CGRect? {
+        let c = content
+        let band = Int(c.minY)
+        guard box != .content, band >= 3 else { return nil }
+        if box == .title {
+            let width = min(Int(c.width), 60)
+            return CGRect(x: Int(c.midX) - width / 2, y: 0, width: width, height: band)
+        }
+        let side = min(16, band - 2)
+        let y = (band - side) / 2
+        let x: Int
+        switch box {
+        case .close: x = Int(c.minX)
+        case .zoom: x = Int(c.maxX) - 2 * side - 4
+        default: x = Int(c.maxX) - side
+        }
+        return CGRect(x: max(0, min(x, Int(size.width) - side)), y: y, width: side, height: side)
+    }
+
+    /// Boxes that runs on some edge need but the layout lacks.
+    var missingBoxes: [Box] {
+        let codes = Set((top + bottom + left + right).map(\.0))
+        var out: [Box] = []
+        for widget in Widget.allCases where rect(Box(rawValue: widget.rawValue)!) == nil
+            && (codes.contains(Part.with(widget)) || codes.contains(Part.without(widget))) {
+            out.append(Box(rawValue: widget.rawValue)!)
+        }
+        if rects[4] == nil && codes.contains(Part.title) { out.append(.title) }
+        return out
+    }
+
     // MARK: - Edge runs
 
     func runs(_ side: Side) -> [(Int, Int)] {
@@ -199,8 +316,13 @@ struct WindowFrame {
     /// Things in a side's list that likely draw wrong. `runs` stands in for
     /// the side's current list.
     func runWarnings(_ side: Side, runs list: [(Int, Int)]? = nil) -> [String] {
+        runIssues(side, runs: list).map(\.message)
+    }
+
+    /// runWarnings, each with the box whose absence causes it, if one does.
+    func runIssues(_ side: Side, runs list: [(Int, Int)]? = nil) -> [(message: String, missing: Box?)] {
         let list = list ?? runs(side)
-        var out: [String] = []
+        var out: [(message: String, missing: Box?)] = []
         var position = 0
         var spans: [(code: Int, start: Int, end: Int)] = []
         for (code, end) in list {
@@ -212,7 +334,7 @@ struct WindowFrame {
             let runs = spans.filter { codes.contains($0.code) && $0.end > $0.start }
             guard !runs.isEmpty else { continue }
             guard let rect = rects[widget.rawValue], !rect.isEmpty else {
-                out.append("A \(Self.widgetName(widget)) run has no \(Self.widgetName(widget)) box in the layout.")
+                out.append(("A \(Self.widgetName(widget)) run has no \(Self.widgetName(widget)) box in the layout.", Box(rawValue: widget.rawValue)))
                 continue
             }
             guard Self.side(of: rect, content: content) == side else { continue }
@@ -220,14 +342,14 @@ struct WindowFrame {
             let high = Int(side.horizontal ? rect.maxX : rect.maxY)
             let withRuns = runs.filter { $0.code == Part.with(widget) }
             if !withRuns.isEmpty && !withRuns.contains(where: { $0.start <= low && $0.end >= high }) {
-                out.append("The \(Self.widgetName(widget)) run doesn't cover its box (\(low)-\(high) px).")
+                out.append(("The \(Self.widgetName(widget)) run doesn't cover its box (\(low)-\(high) px).", nil))
             }
         }
         if spans.contains(where: { $0.code == Part.title }) && rects[4] == nil {
-            out.append("A title run with no title box in the layout.")
+            out.append(("A title run with no title box in the layout.", .title))
         }
         if !spans.contains(where: { (Part.grows.contains($0.code) || Part.fills.contains($0.code)) && $0.end > $0.start }) {
-            out.append("Nothing on this edge grows, so bigger windows leave a gap.")
+            out.append(("Nothing on this edge grows, so bigger windows leave a gap.", nil))
         }
         return out
     }

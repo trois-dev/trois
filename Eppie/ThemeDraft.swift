@@ -13,6 +13,7 @@ struct DraftCheck: Identifiable {
         case generateFrameArt(ThemeManager.FrameArt)
         case takeButtonsFromFrame
         case putButtonsInFrame
+        case addBox(WindowFrame.Box)
     }
 
     let id: String
@@ -392,6 +393,88 @@ extension ThemeManager {
         return nil
     }
 
+    /// Changes some of the draft frame's boxes, nil removing one, then applies
+    /// the draft. The pressed strip follows widget boxes that come, go or
+    /// change size. Returns why the boxes weren't used.
+    @discardableResult
+    func setDraftBoxes(_ changes: [WindowFrame.Box: CGRect?]) -> String? {
+        guard let directory = draftFrameDirectory, let old = WindowFrame(directory: directory) else {
+            return "This theme has no window frame."
+        }
+        guard old.k1 == nil else { return "1.x frames have a fixed layout." }
+        if changes[.content] == .some(nil) { return "A frame needs a content box." }
+        var boxes: [WindowFrame.Box: CGRect] = [:]
+        for box in WindowFrame.Box.allCases {
+            if let change = changes[box] {
+                if let rect = change { boxes[box] = rect.integral }
+            } else if let rect = old.rect(box) {
+                boxes[box] = rect
+            }
+        }
+        if let error = old.boxError(boxes) { return error }
+        recordDraftEdit()
+        saveLayoutBaseline()
+        guard WindowFrame.writeBoxes(changes.mapValues { $0?.integral }, in: directory) else { return "Couldn't write the layout." }
+        var manifest = readManifest(in: draftDirectory) ?? ThemeManifest()
+        repackPressed(from: old, manifest: &manifest)
+        saveDraft(manifest)
+        return nil
+    }
+
+    /// The draft frame's boxes as they were when the frame came in, if they've
+    /// changed since.
+    func baselineBoxes() -> [WindowFrame.Box: CGRect?]? {
+        guard let data = try? Data(contentsOf: layoutBaseline),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let layout = json["layout"] as? [String: Any],
+              let frame = draftFrameDirectory.flatMap(WindowFrame.init(directory:)) else { return nil }
+        var original: [Int: CGRect] = [:]
+        for entry in layout["rects"] as? [[Any]] ?? [] {
+            guard entry.count == 2, let part = entry[0] as? Int, let r = entry[1] as? [Int], r.count == 4 else { continue }
+            original[part] = CGRect(x: r[1], y: r[0], width: r[3] - r[1], height: r[2] - r[0])
+        }
+        var out: [WindowFrame.Box: CGRect?] = [:]
+        for box in WindowFrame.Box.allCases where original[box.rawValue] != frame.rects[box.rawValue] {
+            out[box] = original[box.rawValue]
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    /// Rebuilds the pressed strip for the current widget boxes. Slices of
+    /// widgets whose size didn't change carry over; the rest are made from the
+    /// active art like Generate does, then the draft's pressed buttons are
+    /// painted in. A generated strip is simply made again.
+    private func repackPressed(from old: WindowFrame, manifest: inout ThemeManifest) {
+        guard let directory = draftFrameDirectory, let new = WindowFrame(directory: directory) else { return }
+        let changed = WindowFrame.Widget.allCases.filter {
+            old.rects[$0.rawValue].map { $0.isEmpty ? .zero : $0.size } != new.rects[$0.rawValue].map { $0.isEmpty ? .zero : $0.size }
+        }
+        guard !changed.isEmpty, let strip = frameImage(.pressed) else { return }
+        if manifest.generated?.contains(FrameArt.pressed.generatedKey) == true {
+            makeFrameArt(.pressed, manifest: &manifest)
+            return
+        }
+        let size = new.pressedStripSize
+        guard size.width > 0, let context = PixelOps.context(Int(size.width), Int(size.height)) else {
+            try? fileManager.removeItem(at: directory.appendingPathComponent(FrameArt.pressed.fileName))
+            return
+        }
+        for widget in WindowFrame.Widget.allCases {
+            guard let rect = new.rects[widget.rawValue], !rect.isEmpty, let slice = new.pressedSource(widget) else { continue }
+            var piece: CGImage?
+            if !changed.contains(widget), let oldSlice = old.pressedSource(widget) {
+                piece = strip.cropping(to: oldSlice)
+            } else {
+                piece = new.active.cropping(to: rect).flatMap { PixelOps.derive($0, .pressed) }
+            }
+            if let piece { context.draw(piece, in: PixelOps.flip(slice, height: Int(size.height))) }
+        }
+        guard let image = context.makeImage(),
+              PixelOps.writePNG(image, to: directory.appendingPathComponent(FrameArt.pressed.fileName)) else { return }
+        let keys = Self.frameMirrors.filter { $0.art == .pressed && changed.contains($0.widget) }.map(\.key)
+        pushToFrame(keys, manifest: &manifest)
+    }
+
     /// Puts one side's runs back as they were when the frame came in.
     func revertDraftEdgeRuns(_ side: WindowFrame.Side) {
         guard let original = baselineRuns(side) else { return }
@@ -465,9 +548,12 @@ extension ThemeManager {
 
         if frame.k1 == nil {
             for side in WindowFrame.Side.allCases {
-                for (n, warning) in frame.runWarnings(side).enumerated() {
+                for (n, issue) in frame.runIssues(side).enumerated() {
+                    // Only offered when there's room for the box to start in.
+                    let fixes: [(title: String, fix: DraftCheck.Fix)] = issue.missing
+                        .flatMap { frame.startingRect(for: $0) != nil ? [("Add Box", .addBox($0))] : nil } ?? []
                     checks.append(DraftCheck(id: "runs-\(side.rawValue)-\(n)",
-                                             message: "\(side.rawValue.capitalized) edge: \(warning)", fixes: []))
+                                             message: "\(side.rawValue.capitalized) edge: \(issue.message)", fixes: fixes))
                 }
             }
         }
@@ -500,6 +586,10 @@ extension ThemeManager {
         case .generateFrameArt(let art): generateDraftFrameArt(art)
         case .takeButtonsFromFrame: takeButtonsFromFrame()
         case .putButtonsInFrame: putButtonsInFrame()
+        case .addBox(let box):
+            guard let frame = draftFrameDirectory.flatMap(WindowFrame.init(directory:)),
+                  let rect = frame.startingRect(for: box) else { return }
+            setDraftBoxes([box: rect])
         }
     }
 
