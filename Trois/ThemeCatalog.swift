@@ -217,6 +217,7 @@ struct CatalogTheme: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
     let author: String
+    let description: String?
     let engine: String?
     let source: String?
     let version: Int

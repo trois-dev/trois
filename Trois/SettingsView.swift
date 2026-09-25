@@ -264,7 +264,8 @@ struct CatalogCard: View {
         ) {
             activate()
         }
-        .help(hint)
+        // The theme's own blurb, if it has one, above what clicking does.
+        .help([entry.description, hint].compactMap { $0 }.joined(separator: "\n\n"))
         .contextMenu {
             if let source = entry.source.flatMap(URL.init(string:)),
                ["http", "https"].contains(source.scheme?.lowercased() ?? "") {
@@ -602,6 +603,7 @@ struct ThemePickerView: View {
                         ) {
                             themeManager.applyTheme(theme)
                         }
+                        .help(theme.description ?? "")
                         .contextMenu {
                             if theme.path.path.contains("Application Support") {
                                 Button("Delete Theme", role: .destructive) {

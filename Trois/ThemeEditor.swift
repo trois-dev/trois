@@ -848,6 +848,13 @@ struct ThemeEditorView: View {
                 Text("Website")
                 TextField("Website", text: $info.source, prompt: Text("https://")).labelsHidden()
             }
+            GridRow {
+                Text("Description")
+                TextField("Description", text: $info.description, prompt: Text("Shown when hovering the theme"), axis: .vertical)
+                    .labelsHidden()
+                    .lineLimit(1...4)
+                    .gridCellColumns(3)
+            }
             if let engine = info.engine {
                 GridRow {
                     Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])

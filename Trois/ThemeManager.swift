@@ -6,6 +6,8 @@ struct Theme: Identifiable, Hashable {
     let name: String
     let path: URL
     var author: String?
+    // Author's blurb, shown when hovering the theme.
+    var description: String?
     // Tool the theme was made for, e.g. "Kaleidoscope 1.x", and where it was collected.
     var engine: String?
     var source: URL?
@@ -49,6 +51,7 @@ func engineLabel(_ engine: String) -> String {
 struct ThemeManifest: Codable {
     var name: String?
     var author: String?
+    var description: String?
     var version: Int?
     var engine: String?
     var source: String?
@@ -216,6 +219,7 @@ class ThemeManager: ObservableObject {
 
         if let manifest {
             theme.author = manifest.author
+            theme.description = manifest.description
             theme.version = manifest.version
             theme.engine = manifest.engine
             theme.source = manifest.source.flatMap(URL.init(string:))

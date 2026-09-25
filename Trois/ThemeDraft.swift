@@ -25,6 +25,7 @@ struct DraftCheck: Identifiable {
 struct DraftInfo: Equatable {
     var name = ""
     var author = ""
+    var description = ""
     var version = 1
     // Web page for the theme, saved as "source".
     var source = ""
@@ -174,7 +175,8 @@ extension ThemeManager {
 
     func draftInfo() -> DraftInfo {
         let manifest = readManifest(in: draftDirectory)
-        return DraftInfo(name: manifest?.name ?? "", author: manifest?.author ?? "", version: manifest?.version ?? 1,
+        return DraftInfo(name: manifest?.name ?? "", author: manifest?.author ?? "",
+                         description: manifest?.description ?? "", version: manifest?.version ?? 1,
                          source: manifest?.source ?? "", engine: manifest?.engine)
     }
 
@@ -188,10 +190,13 @@ extension ThemeManager {
             return trimmed.isEmpty ? nil : trimmed
         }
         let name = text(info.name), author = text(info.author), source = text(info.source)
+        let description = info.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let descriptionValue = description.isEmpty ? nil : description
         guard manifest.name != name || manifest.author != author || manifest.version != info.version
-            || manifest.source != source else { return }
+            || manifest.source != source || manifest.description != descriptionValue else { return }
         manifest.name = name
         manifest.author = author
+        manifest.description = descriptionValue
         manifest.version = info.version
         manifest.source = source
         try? writeManifest(manifest, to: draftDirectory)
@@ -598,6 +603,7 @@ extension ThemeManager {
         let manifest = readManifest(in: draftDirectory)
         var theme = Theme(id: draftDirectory.path, name: manifest?.name ?? "Custom Theme", path: draftDirectory)
         theme.author = manifest?.author
+        theme.description = manifest?.description
         theme.version = manifest?.version
         theme.engine = manifest?.engine
         theme.source = manifest?.source.flatMap { URL(string: $0) }
@@ -659,7 +665,8 @@ extension ThemeManager {
             if let frame = defaults.string(forKey: "windowFrameDirectory"), fileManager.fileExists(atPath: frame) {
                 try fileManager.copyItem(atPath: frame, toPath: staging.appendingPathComponent("frame").path)
             }
-            let manifest = ThemeManifest(name: currentTheme?.name, author: currentTheme?.author, version: currentTheme?.version,
+            let manifest = ThemeManifest(name: currentTheme?.name, author: currentTheme?.author,
+                                         description: currentTheme?.description, version: currentTheme?.version,
                                          engine: currentTheme?.engine, source: currentTheme?.source?.absoluteString,
                                          buttons: buttons)
             try writeManifest(manifest, to: staging)
