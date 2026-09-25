@@ -46,6 +46,12 @@ class MultiWindowTracker {
     // global top-left coordinates. Used to clip overlays that are covered.
     private var stack: [CGWindowID] = []
     private var frames: [CGWindowID: CGRect] = [:]
+    // Full-screen title bar windows and the tracked window each belongs to.
+    // In full screen AppKit moves the title bar, buttons included, into its
+    // own window of the same app, in front of the window and flush with its
+    // top edge. It stays ordered in, at alpha 0 while hidden, and moves a few
+    // points while the buttons slide in or out.
+    private var titleBars: [CGWindowID: CGWindowID] = [:]
     private var mouseMonitor: Any?
     // Windows whose first AX lookup is in flight, and the windows the last scan saw.
     private var lookingUp: Set<CGWindowID> = []
@@ -147,6 +153,7 @@ class MultiWindowTracker {
         BorderWindow.hiddenForMissionControl = false
         stack = []
         frames = [:]
+        titleBars = [:]
         generation += 1
         scanInFlight = false
         scanAgain = false
@@ -241,6 +248,11 @@ class MultiWindowTracker {
                 queueScan()
                 queueReorder()
             }
+            return
+        }
+        // Its buttons slide with it, faster than the periodic check.
+        if let target = titleBars[wid] {
+            overlayManagers[target]?.refresh()
             return
         }
         guard let manager = overlayManagers[wid] else { return }
@@ -404,6 +416,7 @@ class MultiWindowTracker {
         var candidates: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
         var newStack: [CGWindowID] = []
         var newFrames: [CGWindowID: CGRect] = [:]
+        var appWindows: [(wid: CGWindowID, pid: pid_t, frame: CGRect)] = []
         var missionControlShown = false
         let windowManagerPIDs = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.WindowManager").map(\.processIdentifier))
 
@@ -442,6 +455,7 @@ class MultiWindowTracker {
                 newStack.append(wid)
                 newFrames[wid] = frame
             }
+            appWindows.append((wid, pid, frame))
 
             if pid == myPID { continue }
             if !allWindows && wid != focusedWID { continue }
@@ -463,6 +477,16 @@ class MultiWindowTracker {
 
         stack = newStack
         frames = newFrames
+        titleBars = [:]
+        for window in appWindows {
+            guard let target = candidates.first(where: {
+                $0.pid == window.pid && $0.wid != window.wid &&
+                    $0.frame.minX == window.frame.minX && $0.frame.width == window.frame.width &&
+                    window.frame.height < $0.frame.height &&
+                    abs(window.frame.minY - $0.frame.minY) <= window.frame.height
+            }) else { continue }
+            titleBars[window.wid] = target.wid
+        }
         // A list read before a Dock hidden event may still show the shield.
         if CFAbsoluteTimeGetCurrent() - lastDockEvent > Self.dockEventGrace {
             BorderWindow.hiddenForMissionControl = missionControlShown
@@ -603,12 +627,13 @@ class MultiWindowTracker {
     // Clips each window's overlays to the parts not covered by windows in front
     // of it, borders included.
     private func updateClipping() {
-        var covers: [CGRect] = []
+        var covers: [(wid: CGWindowID, rects: [CGRect])] = []
         for wid in stack {
             let manager = overlayManagers[wid]
-            manager?.clip(covering: covers)
+            // A window's own title bar doesn't cover its buttons.
+            manager?.clip(covering: covers.filter { titleBars[$0.wid] != wid }.flatMap(\.rects))
             if let frame = frames[wid] {
-                covers.append(contentsOf: manager?.coverRects(for: frame) ?? [frame])
+                covers.append((wid, manager?.coverRects(for: frame) ?? [frame]))
             }
         }
     }
@@ -635,7 +660,7 @@ class MultiWindowTracker {
     }
 
     private func updateSubscription() {
-        let wids = Set(overlayManagers.keys).union(dockWindows).sorted()
+        let wids = Set(overlayManagers.keys).union(dockWindows).union(titleBars.keys).sorted()
         guard wids != subscribed else { return }
         subscribed = wids
         WindowServerEvents.subscribe(wids)

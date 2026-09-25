@@ -705,7 +705,8 @@ class OverlayWindow: NSWindow {
         self.hasShadow = false
         self.ignoresMouseEvents = false
         // Transient hides it for Mission Control and Exposé, where the window it covers shrinks away.
-        self.collectionBehavior = [.canJoinAllSpaces, .transient]
+        // Full-screen auxiliary lets it show on a full-screen window's Space.
+        self.collectionBehavior = [.canJoinAllSpaces, .transient, .fullScreenAuxiliary]
 
         setupImageView()
         setupTracking()
