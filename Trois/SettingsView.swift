@@ -565,7 +565,7 @@ struct ThemePickerView: View {
     @ObservedObject var themeManager = ThemeManager.shared
     @AppStorage("windowBorders") private var windowBorders = true
     @AppStorage("frameButtons") private var frameButtons = false
-    @AppStorage(ButtonArt.Sizing.defaultsKey) private var buttonSizing = ButtonArt.Sizing.bleed.rawValue
+    @AppStorage(ButtonArt.Sizing.defaultsKey) private var buttonSizing = ButtonArt.Sizing.standard.rawValue
     @State private var showingInstallSheet = false
     @State private var dragOver = false
     @State private var installError: String?
@@ -712,7 +712,7 @@ struct ThemePickerView: View {
     }
 
     private func themePreview(_ theme: Theme) -> some View {
-        ThemeButtonsPreview(theme: theme, sizing: ButtonArt.Sizing(rawValue: buttonSizing) ?? .bleed)
+        ThemeButtonsPreview(theme: theme, sizing: ButtonArt.Sizing(rawValue: buttonSizing) ?? .standard)
     }
 }
 

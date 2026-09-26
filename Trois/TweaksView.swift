@@ -51,7 +51,7 @@ final class GeneralState: ObservableObject {
 struct TweaksView: View {
     @AppStorage("windowBorders") private var windowBorders = true
     @AppStorage("frameButtons") private var frameButtons = false
-    @AppStorage(ButtonArt.Sizing.defaultsKey) private var buttonSizing = ButtonArt.Sizing.bleed.rawValue
+    @AppStorage(ButtonArt.Sizing.defaultsKey) private var buttonSizing = ButtonArt.Sizing.standard.rawValue
     @AppStorage("hideMenuBarIcon") private var hideMenuBarIcon = false
     @State private var excluded: [String] = UserDefaults.standard.stringArray(forKey: ExcludedApps.defaultsKey) ?? []
     @State private var selectedApp: String?
@@ -60,7 +60,7 @@ struct TweaksView: View {
     @StateObject private var general = GeneralState()
     @ObservedObject private var themeManager = ThemeManager.shared
 
-    private var sizing: ButtonArt.Sizing { ButtonArt.Sizing(rawValue: buttonSizing) ?? .bleed }
+    private var sizing: ButtonArt.Sizing { ButtonArt.Sizing(rawValue: buttonSizing) ?? .standard }
     private var injects: Bool { SIPDetector.shared.sipDisabled }
     private var app: AppDelegate? { NSApp.delegate as? AppDelegate }
 

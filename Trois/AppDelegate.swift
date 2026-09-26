@@ -21,6 +21,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name: Notification.Name("TroisReloadImages"),
             object: nil
         )
+        // Buttons drawn over the title bar's color need it for the current
+        // appearance, read now and again whenever light or dark changes.
+        TitleBarColor.read { NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil) }
+        DistributedNotificationCenter.default().addObserver(
+            forName: .init("AppleInterfaceThemeChangedNotification"), object: nil, queue: .main
+        ) { _ in
+            // The app's own appearance follows a moment after the notice.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NotificationCenter.default.post(name: .init("TroisReloadImages"), object: nil)
+            }
+        }
 
         // Run as menu bar app (no dock icon)
         NSApp.setActivationPolicy(.accessory)

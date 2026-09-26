@@ -494,19 +494,23 @@ enum ButtonArt {
         case bleed
         // Untrimmed and unscaled. The circle can show around small art.
         case original
+        // Trimmed, drawn 1:1 over a disc of the title bar's color that hides the circle.
+        case backdrop
         // Trimmed and scaled by any factor until it covers the circle.
         case stretch
 
         static let defaultsKey = "buttonSizing"
+        static let standard = Sizing.backdrop
 
         static var current: Sizing {
-            UserDefaults.standard.string(forKey: defaultsKey).flatMap(Sizing.init) ?? .bleed
+            UserDefaults.standard.string(forKey: defaultsKey).flatMap(Sizing.init) ?? standard
         }
 
         var title: String {
             switch self {
             case .bleed: return "Fill gaps"
             case .original: return "Unchanged"
+            case .backdrop: return "Match title bar"
             case .stretch: return "Scale up"
             }
         }
@@ -515,6 +519,7 @@ enum ButtonArt {
             switch self {
             case .bleed: return "Actual size, edges extended to cover the button"
             case .original: return "Not trimmed or scaled. The button can show around small art"
+            case .backdrop: return "Actual size, over the title bar's color so the button doesn't show"
             case .stretch: return "Trimmed and scaled until it covers the button"
             }
         }
@@ -587,9 +592,32 @@ enum ButtonArt {
                 image.draw(in: rect)
                 return true
             }
+        case .backdrop:
+            if let color = TitleBarColor.current {
+                return onDisc(image, cover: cover, backing: backing, color: color)
+            }
+            // Until the color has been read, the art fills the gaps instead.
+            return sized(image, cover: cover, backing: backing, mode: .bleed)
         case .bleed:
             guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
             return bled(cgImage, cover: cover, backing: backing) ?? image
+        }
+    }
+
+    /// The art at its own size, centered on a disc of `color` a point wider
+    /// than the system button's circle, so its antialiased rim is covered too.
+    /// The art stays on whole device pixels.
+    private static func onDisc(_ image: NSImage, cover: CGFloat, backing: CGFloat, color: NSColor) -> NSImage {
+        let disc = cover + 2
+        let size = NSSize(width: max(image.size.width, disc), height: max(image.size.height, disc))
+        func snapped(_ v: CGFloat) -> CGFloat { (v * backing).rounded(.down) / backing }
+        return NSImage(size: size, flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: (size.width - disc) / 2, y: (size.height - disc) / 2, width: disc, height: disc)).fill()
+            NSGraphicsContext.current?.imageInterpolation = .none
+            image.draw(in: NSRect(x: snapped((size.width - image.size.width) / 2), y: snapped((size.height - image.size.height) / 2),
+                                  width: image.size.width, height: image.size.height))
+            return true
         }
     }
 
@@ -692,6 +720,65 @@ enum ButtonArt {
         guard let cropped = filled.cropping(to: crop) else { return nil }
         return NSImage(cgImage: cropped, size: NSSize(width: CGFloat(cropped.width) / CGFloat(s),
                                                         height: CGFloat(cropped.height) / CGFloat(s)))
+    }
+}
+
+/// The color behind the traffic lights of a standard window, in the current
+/// appearance. Other apps' windows can't be read without Screen Recording
+/// permission, but our own can, so it's read from an off-screen window of
+/// ours. Title bars are one flat color around the buttons, focused or not.
+enum TitleBarColor {
+    private static var colors: [Bool: NSColor] = [:]
+
+    static var current: NSColor? { colors[isDark] }
+
+    private static var isDark: Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
+    // AppKit keeps titled windows on screen; this one stays where it's put.
+    private final class OffscreenWindow: NSWindow {
+        override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+    }
+
+    // Deprecated for other windows' content, still the way to read our own.
+    private typealias CreateImageFn = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+    private static let createImage: CreateImageFn? = dlsym(dlopen(nil, RTLD_NOW), "CGWindowListCreateImage")
+        .map { unsafeBitCast($0, to: CreateImageFn.self) }
+
+    /// Reads both appearances' colors, then calls `done` on main.
+    static func read(done: @escaping () -> Void) {
+        var pending = 2
+        for dark in [false, true] {
+            let window = OffscreenWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
+                                         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            window.isReleasedWhenClosed = false
+            window.orderFrontRegardless()
+            window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
+            // The window server needs a moment to draw it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                if let color = sample(window) { colors[dark] = color }
+                window.orderOut(nil)
+                pending -= 1
+                if pending == 0 { done() }
+            }
+        }
+    }
+
+    // The pixel 100 pt in and 10 pt down, in the title bar, clear of the buttons.
+    private static func sample(_ window: NSWindow) -> NSColor? {
+        guard let createImage, let image = createImage(.null, 8, UInt32(window.windowNumber), 1)?.takeRetainedValue(),
+              window.frame.width > 0 else { return nil }
+        let scale = CGFloat(image.width) / window.frame.width
+        var pixel = [UInt8](repeating: 0, count: 4)
+        guard let context = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.draw(image, in: CGRect(x: -100 * scale, y: -(CGFloat(image.height) - 10 * scale),
+                                       width: CGFloat(image.width), height: CGFloat(image.height)))
+        guard pixel[3] == 255 else { return nil }
+        return NSColor(srgbRed: CGFloat(pixel[0]) / 255, green: CGFloat(pixel[1]) / 255, blue: CGFloat(pixel[2]) / 255, alpha: 1)
     }
 }
 
@@ -915,7 +1002,8 @@ class OverlayWindow: NSPanel {
     /// The trimmed image, fitted over the system button's circle per the Buttons setting.
     private func art(_ baseKey: String, state: String) -> NSImage? {
         let mode = ButtonArt.Sizing.current
-        let key = "\(baseKey)\(state)|\(coverSize)|\(backingScale)|\(mode.rawValue)"
+        let disc = mode == .backdrop ? TitleBarColor.current.map { "\($0)" } ?? "none" : ""
+        let key = "\(baseKey)\(state)|\(coverSize)|\(backingScale)|\(mode.rawValue)|\(disc)"
         if let cached = Self.artCache[key] { return cached }
         let image = trimmedImage(baseKey, state: state).map {
             ButtonArt.sized($0, cover: coverSize, backing: backingScale, mode: mode)
