@@ -100,6 +100,8 @@ final class BorderWindow {
     private var isSettingPosition = false
     // Called when the drawn shape changes.
     var shapeChanged: (() -> Void)?
+    // Called just before a widget minimizes the window.
+    var willMinimize: (() -> Void)?
 
     /// Where the border draws, in top-left coordinates of the border window.
     var shape: [CGRect] { layout?.shape ?? [] }
@@ -556,6 +558,7 @@ final class BorderWindow {
     private func mouseUp(with event: NSEvent) {
         if let trackingWidget, pressedWidget == trackingWidget {
             if event.modifierFlags.contains(.option), trackingWidget != .zoom {
+                if trackingWidget == .collapse { willMinimize?() }
                 OverlayManager.pressAll(trackingWidget == .close ? kAXCloseButtonAttribute : kAXMinimizeButtonAttribute, of: pid)
             } else {
                 press(trackingWidget)
@@ -586,6 +589,8 @@ final class BorderWindow {
     }
 
     private func press(_ widget: WindowFrame.Widget) {
+        // The double-click action comes here too.
+        if widget == .collapse { willMinimize?() }
         let element: AXUIElement?
         switch widget {
         case .close: element = target?.close

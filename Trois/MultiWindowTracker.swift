@@ -30,6 +30,9 @@ class MultiWindowTracker {
     private var settleWork: [CGWindowID: DispatchWorkItem] = [:]
     private var refreshWork: [CGWindowID: DispatchWorkItem] = [:]
     private var resizeFollowUps: [CGWindowID: DispatchWorkItem] = [:]
+    // Checks for windows animating away, until this time.
+    private var animationTimer: Timer?
+    private var animationWatchEnd: CFAbsoluteTime = 0
     private var reorderQueued = false
     // The Dock's full-screen windows, one per display. They come on screen for
     // Mission Control and App Exposé but also when an auto-hidden Dock slides
@@ -79,6 +82,8 @@ class MultiWindowTracker {
     // Retries of a rejected window back off to this, so windows that never get
     // buttons don't cost an AX lookup every second.
     private static let maxRejectRetry: CFAbsoluteTime = 16.0
+    // How long to look for animating windows after an animation begins.
+    private static let animationWatch: CFAbsoluteTime = 0.35
     // Resize events can arrive before the window server's final size.
     private static let resizeFollowUpDelay: TimeInterval = 0.032
     // A reorder event can come before the app finishes raising its other windows.
@@ -150,6 +155,8 @@ class MultiWindowTracker {
         scanTimer = nil
         verifyTimer?.invalidate()
         verifyTimer = nil
+        animationTimer?.invalidate()
+        animationTimer = nil
         WindowServerEvents.handler = nil
         WindowServerEvents.subscribe([])
         subscribed = []
@@ -230,6 +237,10 @@ class MultiWindowTracker {
     // MARK: - Window-server events
 
     private func handle(event: UInt32, wid: CGWindowID) {
+        if event == WindowServerEvents.animationBegan {
+            watchAnimation()
+            return
+        }
         if dockWindows.contains(wid) {
             if event == WindowServerEvents.hidden {
                 lastDockEvent = CFAbsoluteTimeGetCurrent()
@@ -298,6 +309,42 @@ class MultiWindowTracker {
         frames[wid] = frame
         manager.resize(targetFrame: frame)
         updateClipping()
+    }
+
+    // A minimize animates the window into the Dock for about half a second
+    // before it's reported hidden, and sends no move or resize events. The
+    // window list reports the warped bounds of the animation while SkyLight
+    // keeps the window's own frame, so for a moment after an animation begins
+    // the two are compared. A window whose sizes differ is animating, and its
+    // overlays and border go at once.
+    private func watchAnimation() {
+        animationWatchEnd = CFAbsoluteTimeGetCurrent() + Self.animationWatch
+        guard animationTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            self?.checkAnimating()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        animationTimer = timer
+    }
+
+    private func checkAnimating() {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now < animationWatchEnd else {
+            animationTimer?.invalidate()
+            animationTimer = nil
+            return
+        }
+        // The on-screen list is the one that shows the warp; a description
+        // of just these windows reports their own frames.
+        guard !overlayManagers.isEmpty,
+              let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
+        for entry in info {
+            guard let wid = entry[kCGWindowNumber as String] as? CGWindowID, let manager = overlayManagers[wid],
+                  let dict = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let listed = CGRect(dictionaryRepresentation: dict),
+                  let own = WindowServer.bounds(of: wid), listed.size != own.size else { continue }
+            manager.hideForAnimation()
+        }
     }
 
     // One more read after the last resize event, for the final size.

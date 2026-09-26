@@ -97,6 +97,12 @@ enum SkyLight {
 }
 
 enum WindowServer {
+    /// Whether a window is on screen now; false once minimized or hidden.
+    static func isOnScreen(_ wid: CGWindowID) -> Bool {
+        let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, wid) as? [[String: Any]]
+        return info?.first?[kCGWindowIsOnscreen as String] as? Bool ?? false
+    }
+
     static func bounds(of wid: CGWindowID) -> CGRect? {
         guard let fn = SkyLight.getWindowBounds, SkyLight.cid != 0 else { return nil }
         var rect = CGRect.zero
@@ -200,6 +206,10 @@ enum WindowServerEvents {
     // A watched window ordered in or out. Used for the Dock's Mission Control window.
     static let shown: UInt32 = 815
     static let hidden: UInt32 = 816
+    // The window server began a window animation, such as the genie into the
+    // Dock. Measured about 25 ms into a minimize, where hidden only comes at
+    // the end, some 500 ms later. The payload is a counter, not a window id.
+    static let animationBegan: UInt32 = 1327
 
     // Called on the main thread with (event, wid).
     static var handler: ((UInt32, CGWindowID) -> Void)?
@@ -216,7 +226,7 @@ enum WindowServerEvents {
               SkyLight.requestNotifications != nil,
               SkyLight.cid != 0 else { return }
         var ok = true
-        for event in [destroyed, moved, resized, reordered, shown, hidden] {
+        for event in [destroyed, moved, resized, reordered, shown, hidden, animationBegan] {
             ok = register(notifyProc, event, nil) == 0 && ok
         }
         isAvailable = ok

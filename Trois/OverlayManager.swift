@@ -294,6 +294,10 @@ class OverlayManager {
             self.pendingPress = type
             self.refresh()
         }
+        // A minimize from here needn't wait to be seen animating.
+        if type == .minimize {
+            overlay.willPress = { [weak self] in self?.hideForAnimation() }
+        }
         let attribute = type == .close ? kAXCloseButtonAttribute : kAXMinimizeButtonAttribute
         overlay.pressAll = { [weak self] in
             guard let self else { return }
@@ -401,6 +405,7 @@ class OverlayManager {
             border = BorderWindow(frame: frame, targetWID: targetWID)
             border?.setActive(isActive)
             border?.shapeChanged = { [weak self] in self?.didChangeShape?() }
+            border?.willMinimize = { [weak self] in self?.hideForAnimation() }
         }
         border?.setFrame(frame)
         let target = BorderTarget(window: snapshot.window, title: snapshot.title,
@@ -430,6 +435,24 @@ class OverlayManager {
         }
         return false
     }
+
+    /// Takes the overlays and border off screen while the window animates
+    /// away, as into the Dock. If the window turns out to stay, a read after
+    /// the animation would have ended brings them back.
+    func hideForAnimation() {
+        guard !removed else { return }
+        closeOverlay?.orderOut(nil)
+        minimizeOverlay?.orderOut(nil)
+        zoomOverlay?.orderOut(nil)
+        border?.orderOut()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.animationRecheck) { [weak self] in
+            guard let self, !self.removed, WindowServer.isOnScreen(self.targetWID) else { return }
+            self.refresh()
+        }
+    }
+
+    // Longer than a minimize, about half a second.
+    private static let animationRecheck: TimeInterval = 0.8
 
     func removeAllOverlays() {
         removed = true
@@ -690,6 +713,8 @@ class OverlayWindow: NSPanel {
     // Called on main for an Option-click, which presses this button on every
     // window of the app.
     var pressAll: (() -> Void)?
+    // Called on main just before a click presses the button.
+    var willPress: (() -> Void)?
     private var trackingArea: NSTrackingArea?
     // A press started on this button and the mouse is still held.
     private var isMouseDown = false
@@ -1068,6 +1093,7 @@ class OverlayWindow: NSPanel {
 
     override func mouseUp(with event: NSEvent) {
         if isMouseDown && isMouseInside {
+            willPress?()
             if event.modifierFlags.contains(.option), buttonType != .zoom, let pressAll {
                 pressAll()
             } else {
