@@ -92,6 +92,7 @@ final class BorderWindow {
     private static let liveResizeRoom: CGFloat = 0.5
     private static let liveResizePause: TimeInterval = 0.25
     private var level: Int32 = 0
+    private var subLevel: Int32 = 0
     private var cornerRadius = BorderWindow.fallbackCornerRadius
     private var closed = false
     // Drag state: mouse and target origin at mouse down, both global top-left.
@@ -107,14 +108,16 @@ final class BorderWindow {
     var shape: [CGRect] { layout?.shape ?? [] }
     private(set) var isVisible = false
 
-    /// Hides every border while Mission Control or App Exposé shows. AppKit
-    /// hides its own transient windows then, but not raw window-server ones.
+    /// Hides every border and button window while Mission Control or App
+    /// Exposé shows. AppKit hides its own transient windows then, but not raw
+    /// window-server ones.
     static var hiddenForMissionControl = false {
         didSet {
             guard hiddenForMissionControl != oldValue else { return }
             for entry in borders.values {
                 entry.border?.applyAlpha()
             }
+            ButtonWindow.missionControlChanged()
         }
     }
 
@@ -130,6 +133,10 @@ final class BorderWindow {
     }()
     // Art is drawn at 2x whatever the display, like the window's backing store.
     private static let scale: CGFloat = 2
+    // Close to an active AppKit window's shadow.
+    private static let shadow: [String: Any] = ["com.apple.WindowShadowDensity": 0.65,
+                                                "com.apple.WindowShadowRadius": 20,
+                                                "com.apple.WindowShadowVerticalOffset": 10]
 
     /// Nil when SkyLight can't make the window.
     init?(frame windowFrame: WindowFrame, targetWID: CGWindowID) {
@@ -158,7 +165,10 @@ final class BorderWindow {
         _ = SkyLight.setWindowResolution?(cid, wid, Self.scale)
         // Not opaque, so transparent pixels show what's behind.
         _ = SkyLight.setWindowOpacity?(cid, wid, false)
-        _ = SkyLight.setShadowProperties?(wid, ["com.apple.WindowShadowDensity": 0] as CFDictionary)
+        // The shadow follows the art's alpha, not the rounded-up shape, and
+        // reaches past the shape's edges. The part inside the hole sits under
+        // the target window.
+        _ = SkyLight.setShadowProperties?(wid, Self.shadow as CFDictionary)
         Self.register(self)
         if Self.hiddenForMissionControl { applyAlpha() }
     }
@@ -243,10 +253,13 @@ final class BorderWindow {
     }
 
     /// Puts the border back directly below its target, e.g. after an app
-    /// raised its windows and left it behind.
+    /// raised its windows and left it behind, or after a RaiseGuard lift ended.
     func reorder() {
         guard isVisible, !closed else { return }
-        commit { tx, order in _ = order(tx, self.windowNumber, -1, self.targetWID) }
+        commit { tx, order in
+            _ = SkyLight.transactionSetSubLevel?(tx, self.windowNumber, self.subLevel + RaiseGuard.lift(of: self.windowNumber))
+            _ = order(tx, self.windowNumber, -1, self.targetWID)
+        }
     }
 
     func orderOut() {
@@ -270,6 +283,7 @@ final class BorderWindow {
         var restyled = false
         if let info = WindowServer.info(of: targetWID) {
             level = info.level
+            subLevel = WindowServer.subLevel(of: targetWID)
             let radius = info.cornerRadius ?? Self.fallbackCornerRadius
             restyled = radius != cornerRadius
             cornerRadius = radius
@@ -294,6 +308,7 @@ final class BorderWindow {
         let origin = outerFrame.origin
         commit { tx, order in
             _ = SkyLight.transactionSetLevel?(tx, windowNumber, level)
+            _ = SkyLight.transactionSetSubLevel?(tx, windowNumber, subLevel + RaiseGuard.lift(of: windowNumber))
             _ = SkyLight.transactionMove?(tx, windowNumber, origin)
             _ = order(tx, windowNumber, -1, targetWID)
         }
@@ -437,6 +452,8 @@ final class BorderWindow {
             drawnRects = rects
             context.flush()
             _ = SkyLight.flushWindow?(cid, windowNumber, nil)
+            // The shadow is traced from the art and goes stale when it changes.
+            _ = SkyLight.invalidateShadow?(cid, windowNumber)
         }
         let oldShape = self.layout?.shape
         self.layout = layout

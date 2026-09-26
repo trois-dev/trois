@@ -21,6 +21,9 @@
 		A100002A /* WindowBorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100002B; };
 		C1D00001 /* WindowFrameK1.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D00002; };
 		C1D0W001 /* WindowFrameWB.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D0W002; };
+		A1000035 /* StageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000036; };
+		A1000037 /* ButtonWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000038; };
+		A1000039 /* RaiseGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100003A; };
 		C1D00003 /* TitleStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D00004; };
 		D7E00001 /* TweaksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7E00002; };
 		A100002C /* FramePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100002D; };
@@ -47,6 +50,9 @@
 		A100002B /* WindowBorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowBorder.swift; sourceTree = "<group>"; };
 		C1D00002 /* WindowFrameK1.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFrameK1.swift; sourceTree = "<group>"; };
 		C1D0W002 /* WindowFrameWB.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFrameWB.swift; sourceTree = "<group>"; };
+		A1000036 /* StageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageManager.swift; sourceTree = "<group>"; };
+		A1000038 /* ButtonWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ButtonWindow.swift; sourceTree = "<group>"; };
+		A100003A /* RaiseGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaiseGuard.swift; sourceTree = "<group>"; };
 		C1D00004 /* TitleStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TitleStyle.swift; sourceTree = "<group>"; };
 		D7E00002 /* TweaksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TweaksView.swift; sourceTree = "<group>"; };
 		A100002D /* FramePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FramePreview.swift; sourceTree = "<group>"; };
@@ -96,6 +102,9 @@
 				A100002B /* WindowBorder.swift */,
 				C1D00002 /* WindowFrameK1.swift */,
 				C1D0W002 /* WindowFrameWB.swift */,
+				A1000036 /* StageManager.swift */,
+				A1000038 /* ButtonWindow.swift */,
+				A100003A /* RaiseGuard.swift */,
 				C1D00004 /* TitleStyle.swift */,
 				D7E00002 /* TweaksView.swift */,
 				A100002D /* FramePreview.swift */,
@@ -189,6 +198,9 @@
 				A100002A /* WindowBorder.swift in Sources */,
 				C1D00001 /* WindowFrameK1.swift in Sources */,
 				C1D0W001 /* WindowFrameWB.swift in Sources */,
+				A1000035 /* StageManager.swift in Sources */,
+				A1000037 /* ButtonWindow.swift in Sources */,
+				A1000039 /* RaiseGuard.swift in Sources */,
 				C1D00003 /* TitleStyle.swift in Sources */,
 				D7E00001 /* TweaksView.swift in Sources */,
 				A100002C /* FramePreview.swift in Sources */,

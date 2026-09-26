@@ -68,6 +68,11 @@ class MultiWindowTracker {
     private var generation = 0
     private let buttonWatcher = ButtonWatcher()
     private var windowPIDs: [CGWindowID: pid_t] = [:]
+    // For Dock-click lifts: app bundle paths by pid, the Dock's pid, and the
+    // lists last given to RaiseGuard.
+    private var bundlePaths: [pid_t: String] = [:]
+    private var dockPID: pid_t = 0
+    private var publishedDockLifts: [String: [CGWindowID: [CGWindowID]]] = [:]
     // Extra reads made because button offsets kept changing, per window.
     private var followUpReads: [CGWindowID: Int] = [:]
 
@@ -116,6 +121,10 @@ class MultiWindowTracker {
         WindowServerEvents.handler = { [weak self] event, wid in
             self?.handle(event: event, wid: wid)
         }
+        RaiseGuard.start()
+        RaiseGuard.didEnd = { [weak self] target in
+            self?.overlayManagers[target]?.reorder()
+        }
 
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification,
@@ -159,6 +168,7 @@ class MultiWindowTracker {
         animationTimer = nil
         WindowServerEvents.handler = nil
         WindowServerEvents.subscribe([])
+        RaiseGuard.didEnd = nil
         subscribed = []
         dockWindows = []
         BorderWindow.hiddenForMissionControl = false
@@ -187,9 +197,11 @@ class MultiWindowTracker {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         if notification.name == NSWorkspace.didLaunchApplicationNotification, app?.bundleIdentifier == "com.apple.dock" {
             findDockWindows()
+            dockPID = 0
         }
         if notification.name == NSWorkspace.didTerminateApplicationNotification, let app {
             buttonWatcher.forget(app.processIdentifier)
+            bundlePaths[app.processIdentifier] = nil
         }
         scan()
     }
@@ -241,6 +253,10 @@ class MultiWindowTracker {
             watchAnimation()
             return
         }
+        if event == WindowServerEvents.frontChanged {
+            liftActivatedApp()
+            return
+        }
         if dockWindows.contains(wid) {
             if event == WindowServerEvents.hidden {
                 lastDockEvent = CFAbsoluteTimeGetCurrent()
@@ -261,7 +277,7 @@ class MultiWindowTracker {
             if frames[wid] != nil {
                 // The raised window's border follows at once; the pass catches
                 // the rest of an app's windows raised along with it.
-                overlayManagers[wid]?.reorderBorder()
+                overlayManagers[wid]?.reorder()
                 queueScan()
                 queueReorder()
             }
@@ -369,7 +385,7 @@ class MultiWindowTracker {
             guard let self else { return }
             self.reorderQueued = false
             for manager in self.overlayManagers.values {
-                manager.reorderBorder()
+                manager.reorder()
             }
         }
     }
@@ -450,11 +466,12 @@ class MultiWindowTracker {
         windowListQueue.async { [weak self] in
             let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
             let infoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
+            let stripWindows = StageManager.stripWindowIDs()
             DispatchQueue.main.async {
                 guard let self, generation == self.generation else { return }
                 self.scanInFlight = false
                 if let infoList {
-                    self.apply(windowList: infoList)
+                    self.apply(windowList: infoList, stripWindows: stripWindows)
                 }
                 if self.scanAgain {
                     self.scanAgain = false
@@ -464,7 +481,7 @@ class MultiWindowTracker {
         }
     }
 
-    private func apply(windowList infoList: [[String: Any]]) {
+    private func apply(windowList infoList: [[String: Any]], stripWindows: Set<CGWindowID>) {
         let myPID = ProcessInfo.processInfo.processIdentifier
         let myBundleID = Bundle.main.bundleIdentifier
         let excluded = ExcludedApps.current
@@ -483,6 +500,9 @@ class MultiWindowTracker {
                 continue
             }
             if dockWindows.contains(wid) { continue }
+            // Stage Manager's strip thumbnails are the windows themselves, still
+            // on screen. They neither get overlays nor cover anything.
+            if stripWindows.contains(wid) { continue }
             // Mission Control and App Exposé put a full-screen shield from
             // WindowManager just under the Dock. Window names need Screen
             // Recording, so it's matched by owner, level and size instead.
@@ -493,11 +513,12 @@ class MultiWindowTracker {
                 missionControlShown = true
                 continue
             }
-            // Skip system UI (layer != 0). Our overlays float, so this also
-            // skips them, but our normal windows such as Settings are kept.
+            // Skip system UI (layer != 0). Fallback overlay panels float, so
+            // this also skips them, but our normal windows such as Settings are kept.
             if layer != 0 { continue }
-            // Borders share their window's level but are drawn around it, not over others.
-            if BorderWindow.isBorder(wid) { continue }
+            // Borders and button windows share their window's level but sit
+            // around and on it, not over others.
+            if BorderWindow.isBorder(wid) || ButtonWindow.isButton(wid) { continue }
 
             guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: boundsDict) else {
@@ -542,6 +563,9 @@ class MultiWindowTracker {
                     abs(window.frame.minY - $0.frame.minY) <= window.frame.height
             }) else { continue }
             titleBars[window.wid] = target.wid
+        }
+        for (wid, manager) in overlayManagers {
+            manager.titleBarWID = titleBar(of: wid)
         }
         // A list read before a Dock hidden event may still show the shield.
         if CFAbsoluteTimeGetCurrent() - lastDockEvent > Self.dockEventGrace {
@@ -645,6 +669,7 @@ class MultiWindowTracker {
             // The window may have closed or lost focus while AX was read.
             guard seenWindows.contains(wid), overlayManagers[wid] == nil else { continue }
             let manager = OverlayManager(targetWID: wid, pid: pid)
+            manager.titleBarWID = titleBar(of: wid)
             guard manager.apply(read) else {
                 manager.removeAllOverlays()
                 rejected[wid] = (now, (rejected[wid]?.failures ?? 0) + 1)
@@ -691,6 +716,59 @@ class MultiWindowTracker {
                 covers.append((wid, manager?.coverRects(for: frame) ?? [frame]))
             }
         }
+        updateDockLifts()
+    }
+
+    // Keeps RaiseGuard's per-app lists current for Dock clicks. This runs on
+    // every stack change, so app lookups are cached.
+    private func updateDockLifts() {
+        var entries: [String: [CGWindowID: [CGWindowID]]] = [:]
+        for pid in Set(windowPIDs.values) {
+            if bundlePaths[pid] == nil {
+                bundlePaths[pid] = NSRunningApplication(processIdentifier: pid)?.bundleURL?.standardizedFileURL.path ?? ""
+            }
+            guard let path = bundlePaths[pid], !path.isEmpty else { continue }
+            entries[path] = liftEntries(for: pid)
+        }
+        if dockPID == 0 || entries != publishedDockLifts {
+            if dockPID == 0 {
+                dockPID = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier ?? 0
+            }
+            publishedDockLifts = entries
+            RaiseGuard.setAppEntries(entries, dock: dockPID)
+        }
+    }
+
+    // The app now in front is about to raise its windows. Their buttons and
+    // frames are lifted, except parts another of the app's windows covers:
+    // the app keeps its own order, so those stay covered, and a lifted one
+    // would show through for a frame. A window being clicked ends up on top
+    // of the app's others.
+    private func liftActivatedApp() {
+        guard let pid = WindowServer.frontPID() else { return }
+        RaiseGuard.lift(liftEntries(for: pid, clicked: RaiseGuard.clickedTarget))
+    }
+
+    // What to lift when `pid`'s windows come forward, keeping their order,
+    // with `clicked` on top of the app's others.
+    private func liftEntries(for pid: pid_t, clicked: CGWindowID? = nil) -> [CGWindowID: [CGWindowID]] {
+        var order = stack
+        if let clicked, let index = order.firstIndex(of: clicked) {
+            order.insert(order.remove(at: index), at: 0)
+        }
+        var covers: [CGRect] = []
+        var entries: [CGWindowID: [CGWindowID]] = [:]
+        for wid in order {
+            // Only tracked windows are known to be the app's.
+            guard windowPIDs[wid] == pid, let frame = frames[wid], let manager = overlayManagers[wid] else { continue }
+            entries[wid] = manager.uncoveredWindows(covers)
+            covers += manager.coverRects(for: frame)
+        }
+        return entries
+    }
+
+    private func titleBar(of wid: CGWindowID) -> CGWindowID? {
+        titleBars.first { $0.value == wid }?.key
     }
 
     // The focused window of the frontmost app draws the active frame.

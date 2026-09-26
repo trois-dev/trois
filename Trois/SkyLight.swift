@@ -79,8 +79,14 @@ enum SkyLight {
     static let freezeWindow: FreezeWindowFn? = sym("SLSWindowFreezeWithOptions")
     static let thawWindow: WindowFn? = sym("SLSWindowThaw")
     static let setShadowProperties: SetShadowPropertiesFn? = sym("SLSWindowSetShadowProperties")
+    static let invalidateShadow: WindowFn? = sym("SLSInvalidateWindowShadow")
     static let transactionOrder: TransactionOrderFn? = sym("SLSTransactionOrderWindow")
     static let transactionSetLevel: TransactionSetLevelFn? = sym("SLSTransactionSetWindowLevel")
+    // Sub-levels order windows within a level; a higher one stays above
+    // windows raised in a lower one.
+    static let transactionSetSubLevel: TransactionSetLevelFn? = sym("SLSTransactionSetWindowSubLevel")
+    typealias GetWindowSubLevelFn = @convention(c) (Int32, UInt32) -> Int32
+    static let getWindowSubLevel: GetWindowSubLevelFn? = sym("SLSGetWindowSubLevel")
     static let windowQuery: WindowQueryFn? = sym("SLSWindowQueryWindows")
     static let queryResultCopyWindows: QueryResultCopyWindowsFn? = sym("SLSWindowQueryResultCopyWindows")
     static let iteratorAdvance: IteratorAdvanceFn? = sym("SLSWindowIteratorAdvance")
@@ -89,6 +95,17 @@ enum SkyLight {
     static let iteratorGetCornerRadii: IteratorGetCornerRadiiFn? = sym("SLSWindowIteratorGetCornerRadii")
     static let copySpacesForWindows: CopySpacesForWindowsFn? = sym("SLSCopySpacesForWindows")
     static let moveWindowsToSpace: MoveWindowsToSpaceFn? = sym("SLSMoveWindowsToManagedSpace")
+    // (cid, 0, 1, 0, screen point, out window point, out wid, out owner cid), as yabai calls it.
+    typealias FindWindowAndOwnerFn = @convention(c) (Int32, Int32, Int32, Int32, UnsafeMutablePointer<CGPoint>,
+                                                    UnsafeMutablePointer<CGPoint>, UnsafeMutablePointer<UInt32>, UnsafeMutablePointer<Int32>) -> Int32
+    static let findWindowAndOwner: FindWindowAndOwnerFn? = sym("SLSFindWindowAndOwner")
+    // Process serial numbers are passed as 8-byte buffers.
+    typealias GetFrontProcessFn = @convention(c) (UnsafeMutableRawPointer) -> Int32
+    typealias ConnectionForPSNFn = @convention(c) (Int32, UnsafeRawPointer, UnsafeMutablePointer<Int32>) -> Int32
+    typealias ConnectionPIDFn = @convention(c) (Int32, UnsafeMutablePointer<pid_t>) -> Int32
+    static let getFrontProcess: GetFrontProcessFn? = sym("_SLPSGetFrontProcess")
+    static let connectionForPSN: ConnectionForPSNFn? = sym("SLSGetConnectionIDForPSN")
+    static let connectionPID: ConnectionPIDFn? = sym("SLSConnectionGetPID")
 
     static let cid: Int32 = {
         let fn: MainConnectionFn? = sym("SLSMainConnectionID")
@@ -112,14 +129,16 @@ enum WindowServer {
 
     /// Moves our own windows in one transaction, skipping the AppKit round-trip
     /// and keeping the overlays of one window in step with each other. Each
-    /// `below` entry orders a window directly under another app's window in the
-    /// same commit, so position and depth never drift apart.
+    /// `below` entry orders a window directly under another app's window, and
+    /// each `above` entry directly over one, in the same commit, so position
+    /// and depth never drift apart.
     /// Returns false when SkyLight is unavailable and nothing was sent.
     // Ordering against another app's window only works for raw window-server
     // windows at that window's level. AppKit windows ignore it, and a window at
     // another level stays in its own band, so button overlays still float.
     static func move(_ moves: [(wid: CGWindowID, origin: CGPoint)],
-                     below: [(wid: CGWindowID, target: CGWindowID)] = []) -> Bool {
+                     below: [(wid: CGWindowID, target: CGWindowID)] = [],
+                     above: [(wid: CGWindowID, target: CGWindowID)] = []) -> Bool {
         guard let create = SkyLight.transactionCreate,
               let move = SkyLight.transactionMove,
               let commit = SkyLight.transactionCommit,
@@ -131,6 +150,9 @@ enum WindowServer {
         if let order = SkyLight.transactionOrder {
             for b in below {
                 _ = order(tx, b.wid, -1, b.target)
+            }
+            for a in above {
+                _ = order(tx, a.wid, 1, a.target)
             }
         }
         return commit(tx, 0) == 0
@@ -152,6 +174,11 @@ enum WindowServer {
         return (getLevel(iterator), radius)
     }
 
+    static func subLevel(of wid: CGWindowID) -> Int32 {
+        guard let fn = SkyLight.getWindowSubLevel, SkyLight.cid != 0 else { return 0 }
+        return fn(SkyLight.cid, wid)
+    }
+
     /// The Space a window is on, or nil if unknown.
     static func space(of wid: CGWindowID) -> UInt64? {
         guard let copy = SkyLight.copySpacesForWindows, SkyLight.cid != 0,
@@ -161,6 +188,44 @@ enum WindowServer {
 
     static func moveToSpace(_ wid: CGWindowID, _ space: UInt64) {
         _ = SkyLight.moveWindowsToSpace?(SkyLight.cid, [NSNumber(value: wid)] as CFArray, space)
+    }
+
+    /// The front process as the window server has it, which NSWorkspace can
+    /// trail right after a switch.
+    static func frontPID() -> pid_t? {
+        guard let getFront = SkyLight.getFrontProcess, let forPSN = SkyLight.connectionForPSN,
+              let getPID = SkyLight.connectionPID, SkyLight.cid != 0 else {
+            return NSWorkspace.shared.frontmostApplication?.processIdentifier
+        }
+        var psn: UInt64 = 0
+        var connection: Int32 = 0
+        var pid: pid_t = 0
+        guard getFront(&psn) == 0, forPSN(SkyLight.cid, &psn, &connection) == 0,
+              getPID(connection, &pid) == 0 else {
+            return NSWorkspace.shared.frontmostApplication?.processIdentifier
+        }
+        return pid
+    }
+
+    /// The window a click at a global top-left point would reach, or nil if unknown.
+    static func window(at point: CGPoint) -> CGWindowID? {
+        windowAndOwner(at: point)?.wid
+    }
+
+    /// The window a click at a global top-left point would reach and its
+    /// owner's pid, which is 0 if unknown.
+    static func windowAndOwner(at point: CGPoint) -> (wid: CGWindowID, pid: pid_t)? {
+        guard let find = SkyLight.findWindowAndOwner, SkyLight.cid != 0 else { return nil }
+        var screenPoint = point
+        var windowPoint = CGPoint.zero
+        var wid: UInt32 = 0
+        var owner: Int32 = 0
+        guard find(SkyLight.cid, 0, 1, 0, &screenPoint, &windowPoint, &wid, &owner) == 0 else { return nil }
+        var pid: pid_t = 0
+        if let getPID = SkyLight.connectionPID, getPID(owner, &pid) != 0 {
+            pid = 0
+        }
+        return (wid, pid)
     }
 }
 
@@ -210,6 +275,9 @@ enum WindowServerEvents {
     // Dock. Measured about 25 ms into a minimize, where hidden only comes at
     // the end, some 500 ms later. The payload is a counter, not a window id.
     static let animationBegan: UInt32 = 1327
+    // The front app changed, as Cmd-Tab or a Dock click does. Measured some
+    // 40 ms before the app raises its windows. No payload; wid is 0.
+    static let frontChanged: UInt32 = 1508
 
     // Called on the main thread with (event, wid).
     static var handler: ((UInt32, CGWindowID) -> Void)?
@@ -230,6 +298,8 @@ enum WindowServerEvents {
             ok = register(notifyProc, event, nil) == 0 && ok
         }
         isAvailable = ok
+        // Optional; without it only clicks are guarded against raise flashes.
+        _ = register(notifyProc, frontChanged, nil)
     }
 
     /// Replaces the interest list with `wids`.
@@ -241,10 +311,14 @@ enum WindowServerEvents {
         }
     }
 
-    // Payload for all of these events starts with the uint32 window id.
+    // Payloads start with the uint32 window id, except for frontChanged.
     private static let notifyProc: SkyLight.NotifyProc = { event, data, length, _ in
-        guard let data, length >= 4 else { return }
-        let wid = CGWindowID(data.loadUnaligned(as: UInt32.self))
+        var wid: CGWindowID = 0
+        if let data, length >= 4 {
+            wid = CGWindowID(data.loadUnaligned(as: UInt32.self))
+        } else if event != frontChanged {
+            return
+        }
         if Thread.isMainThread {
             WindowServerEvents.handler?(event, wid)
         } else {

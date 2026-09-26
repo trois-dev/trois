@@ -48,9 +48,9 @@ enum WindowRead {
 }
 
 class OverlayManager {
-    private var closeOverlay: OverlayWindow?
-    private var minimizeOverlay: OverlayWindow?
-    private var zoomOverlay: OverlayWindow?
+    private var closeOverlay: TrafficLightOverlay?
+    private var minimizeOverlay: TrafficLightOverlay?
+    private var zoomOverlay: TrafficLightOverlay?
     private var border: BorderWindow?
     private var currentWindow: AXUIElement?
     let targetWID: CGWindowID
@@ -75,6 +75,19 @@ class OverlayManager {
     // Called on main when the border's drawn shape changes, so windows behind
     // it can be clipped again.
     var didChangeShape: (() -> Void)?
+    // The separate window AppKit draws a full-screen window's title bar in,
+    // which holds its buttons. Overlays sit above it rather than the target.
+    var titleBarWID: CGWindowID? {
+        didSet {
+            guard titleBarWID != oldValue else { return }
+            for overlay in overlays {
+                overlay.orderAbove = orderTarget
+                overlay.reorder()
+            }
+        }
+    }
+    private var orderTarget: CGWindowID { titleBarWID ?? targetWID }
+    private var overlays: [TrafficLightOverlay] { [closeOverlay, minimizeOverlay, zoomOverlay].compactMap { $0 } }
 
     init(targetWID: CGWindowID, pid: pid_t) {
         self.targetWID = targetWID
@@ -125,10 +138,11 @@ class OverlayManager {
                 targetFrame = frame
             }
             offsets = ButtonFrames()
-            closeOverlay?.orderOut(nil)
-            minimizeOverlay?.orderOut(nil)
-            zoomOverlay?.orderOut(nil)
+            closeOverlay?.hide()
+            minimizeOverlay?.hide()
+            zoomOverlay?.hide()
             border?.orderOut()
+            RaiseGuard.remove(targetWID)
             return false
         case .window(let snapshot):
             // The window may have moved while AX was read. Offsets hold either
@@ -179,19 +193,20 @@ class OverlayManager {
     /// window-server transaction.
     func follow(targetFrame frame: CGRect, includingBorder: Bool = true) {
         targetFrame.origin = frame.origin
-        var moves: [(overlay: OverlayWindow, center: CGPoint)] = []
+        var moves: [(overlay: TrafficLightOverlay, center: CGPoint)] = []
         for (overlay, offset) in overlaysWithOffsets() where overlay.isVisible {
             moves.append((overlay, CGPoint(x: frame.minX + offset.midX, y: frame.minY + offset.midY)))
         }
         let movingBorder = includingBorder && border?.isVisible == true ? border : nil
         guard !moves.isEmpty || movingBorder != nil else { return }
-        var serverMoves = moves.map { (wid: CGWindowID($0.overlay.windowNumber), origin: $0.overlay.origin(centeredOn: $0.center)) }
+        var serverMoves = moves.map { (wid: $0.overlay.serverID, origin: $0.overlay.origin(centeredOn: $0.center)) }
         var below: [(wid: CGWindowID, target: CGWindowID)] = []
         if let movingBorder {
             serverMoves.append((movingBorder.windowNumber, movingBorder.origin(following: frame.origin)))
             below.append((movingBorder.windowNumber, targetWID))
         }
-        if WindowServer.move(serverMoves, below: below) {
+        let above = moves.filter { $0.overlay.ordersAboveTarget }.map { (wid: $0.overlay.serverID, target: orderTarget) }
+        if WindowServer.move(serverMoves, below: below, above: above) {
             for m in moves { m.overlay.didMoveOnServer(center: m.center) }
             movingBorder?.didMoveOnServer(targetOrigin: frame.origin)
         } else {
@@ -207,9 +222,13 @@ class OverlayManager {
         border?.resize(to: frame)
     }
 
-    /// Puts the border back directly below the target.
-    func reorderBorder() {
+    /// Puts the border back directly below the target and the overlays
+    /// directly above it.
+    func reorder() {
         border?.reorder()
+        for overlay in overlays {
+            overlay.reorder()
+        }
     }
 
     /// Clips each overlay to the part not covered by `covers`, the frames of
@@ -283,7 +302,7 @@ class OverlayManager {
             abs(closeFrame.minY - (targetFrame.minY + offset.minY)) < 1
     }
 
-    private func overlay(for type: TrafficLightType) -> OverlayWindow? {
+    private func overlay(for type: TrafficLightType) -> TrafficLightOverlay? {
         switch type {
         case .close: return closeOverlay
         case .minimize: return minimizeOverlay
@@ -291,8 +310,14 @@ class OverlayManager {
         }
     }
 
-    private func makeOverlay(_ type: TrafficLightType) -> OverlayWindow {
-        let overlay = OverlayWindow(buttonType: type)
+    private func makeOverlay(_ type: TrafficLightType) -> TrafficLightOverlay {
+        let overlay: TrafficLightOverlay
+        if ButtonWindow.isEnabled, let window = ButtonWindow(buttonType: type) {
+            overlay = window
+        } else {
+            overlay = OverlayWindow(buttonType: type)
+        }
+        overlay.orderAbove = orderTarget
         overlay.setWindowActive(isActive)
         overlay.surface = surface
         overlay.pressFailed = { [weak self] in
@@ -329,8 +354,8 @@ class OverlayManager {
         }
     }
 
-    private func overlaysWithOffsets() -> [(OverlayWindow, CGRect)] {
-        var result: [(OverlayWindow, CGRect)] = []
+    private func overlaysWithOffsets() -> [(TrafficLightOverlay, CGRect)] {
+        var result: [(TrafficLightOverlay, CGRect)] = []
         if let o = closeOverlay, let f = offsets.close { result.append((o, f)) }
         if let o = minimizeOverlay, let f = offsets.minimize { result.append((o, f)) }
         if let o = zoomOverlay, let f = offsets.zoom { result.append((o, f)) }
@@ -426,7 +451,7 @@ class OverlayManager {
             closeOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
             closeOverlay?.targetButton = snapshot.closeButton
         } else {
-            closeOverlay?.orderOut(nil)
+            closeOverlay?.hide()
         }
 
         if let offset = offsets.minimize {
@@ -436,7 +461,7 @@ class OverlayManager {
             minimizeOverlay?.updateFrame(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY))
             minimizeOverlay?.targetButton = snapshot.minimizeButton
         } else {
-            minimizeOverlay?.orderOut(nil)
+            minimizeOverlay?.hide()
         }
 
         if let offset = offsets.zoom {
@@ -447,10 +472,37 @@ class OverlayManager {
             zoomOverlay?.targetButton = snapshot.zoomButton
             zoomOverlay?.setZoomedState(zoomed)
         } else {
-            zoomOverlay?.orderOut(nil)
+            zoomOverlay?.hide()
         }
 
         updateBorder(for: snapshot)
+        updateRaiseGuard()
+    }
+
+    /// Our raw windows for this target that none of `covers` (global
+    /// top-left rects) overlaps.
+    func uncoveredWindows(_ covers: [CGRect]) -> [CGWindowID] {
+        func clear(_ rect: CGRect) -> Bool { !covers.contains { $0.intersects(rect) } }
+        var result: [CGWindowID] = []
+        for (overlay, offset) in overlaysWithOffsets() where overlay.ordersAboveTarget && overlay.isVisible {
+            if clear(offset.offsetBy(dx: targetFrame.minX, dy: targetFrame.minY)) {
+                result.append(overlay.serverID)
+            }
+        }
+        if let border, border.isVisible {
+            let outer = border.outerFrame
+            if border.shape.allSatisfy({ clear($0.offsetBy(dx: outer.minX, dy: outer.minY)) }) {
+                result.append(border.windowNumber)
+            }
+        }
+        return result
+    }
+
+    // Tells RaiseGuard which raw windows to lift when the target is clicked.
+    private func updateRaiseGuard() {
+        let frame = border?.isVisible == true ? border?.windowNumber : nil
+        let buttons = overlays.filter { $0.ordersAboveTarget && $0.isVisible }.map(\.serverID)
+        RaiseGuard.set(buttons + (frame.map { [$0] } ?? []), frame: frame, for: targetWID)
     }
 
     private func updateBorder(for snapshot: WindowSnapshot) {
@@ -500,9 +552,9 @@ class OverlayManager {
     /// the animation would have ended brings them back.
     func hideForAnimation() {
         guard !removed else { return }
-        closeOverlay?.orderOut(nil)
-        minimizeOverlay?.orderOut(nil)
-        zoomOverlay?.orderOut(nil)
+        closeOverlay?.hide()
+        minimizeOverlay?.hide()
+        zoomOverlay?.hide()
         border?.orderOut()
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.animationRecheck) { [weak self] in
             guard let self, !self.removed, WindowServer.isOnScreen(self.targetWID) else { return }
@@ -515,6 +567,7 @@ class OverlayManager {
 
     func removeAllOverlays() {
         removed = true
+        RaiseGuard.remove(targetWID)
         closeOverlay?.close()
         minimizeOverlay?.close()
         zoomOverlay?.close()
@@ -888,9 +941,116 @@ enum TrafficLightType {
     case zoom
 }
 
+/// Picks a traffic light's theme art for a mouse state, sized over the system
+/// button's circle. Shared by both kinds of overlay.
+struct ButtonArtPicker {
+    let buttonType: TrafficLightType
+    // Zoomed windows show the restore art.
+    var isZoomed = false
+    // What the button sits on, whose color it's drawn over.
+    var surface = TitleBarColor.Surface.titleBar
+    // Diameter of the system button's circle, which images must cover. The
+    // system draws it 1pt inside the AX button frame: 14pt in a 16pt frame on
+    // macOS 27, 12pt before.
+    var coverSize: CGFloat = 14
+    // Device pixels per point on the display under the button.
+    var backingScale: CGFloat = NSScreen.main?.backingScaleFactor ?? 2
+    private var sizing: ButtonArt.Sizing { ButtonArt.Sizing.current }
+    // Sized art by key, state, cover, scale and sizing mode, so hovering doesn't
+    // reload and reprocess files. Nil entries remember a missing image. Shared
+    // by every window's overlays, which show the same theme.
+    private static var artCache: [String: NSImage?] = [:]
+
+    init(buttonType: TrafficLightType) {
+        self.buttonType = buttonType
+    }
+
+    /// Drops cached art after the theme's files changed.
+    static func clearCache() {
+        artCache.removeAll()
+    }
+
+    /// The art for `state` ("", "Hover", "Pressed" or "Disabled"), and whether
+    /// it sets the overlay's size, which only resting states do. Nil keeps
+    /// whatever shows now, for a theme without hover or pressed art.
+    func pick(_ state: String) -> (image: NSImage, sizes: Bool)? {
+        let baseKey: String
+        switch buttonType {
+        case .close: baseKey = "closeButton"
+        case .minimize: baseKey = "minimizeButton"
+        case .zoom:
+            // Use restore images when window is zoomed, maximize images otherwise
+            baseKey = isZoomed ? "restoreButton" : "zoomButton"
+        }
+
+        if let image = art(baseKey, state: state) {
+            return (image, state.isEmpty || state == "Disabled")
+        } else if state == "Disabled" {
+            return pick("")
+        } else if state.isEmpty {
+            // Fallback: try zoom button images if restore not available
+            if isZoomed, let image = art("zoomButton", state: state) {
+                return (image, true)
+            }
+            // Only fall back to default for normal state
+            return (defaultImage(), true)
+        }
+        // For hover/pressed, if no image, keep current image
+        return nil
+    }
+
+    /// The image for `baseKey` in `state`, trimmed to the box shared by all of
+    /// that button's states. Zoom and restore share one box.
+    private func trimmedImage(_ baseKey: String, state: String) -> NSImage? {
+        let defaults = UserDefaults.standard
+        let bases = buttonType == .zoom ? ["zoomButton", "restoreButton"] : [baseKey]
+        let states = ["", "Hover", "Pressed", "Disabled"]
+        let keys = bases.flatMap { base in states.map { base + $0 + "Image" } }
+        guard let index = keys.firstIndex(of: baseKey + state + "Image") else { return nil }
+        let trim = sizing != .original
+        return ButtonArt.load(keys.map { defaults.string(forKey: $0) }, trim: trim)[index]
+    }
+
+    /// The trimmed image, fitted over the system button's circle per the Buttons setting.
+    private func art(_ baseKey: String, state: String) -> NSImage? {
+        let mode = sizing
+        let disc = mode == .backdrop ? TitleBarColor.color(surface).map { "\($0)" } ?? "none" : ""
+        let key = "\(baseKey)\(state)|\(coverSize)|\(backingScale)|\(mode.rawValue)|\(disc)"
+        if let cached = Self.artCache[key] { return cached }
+        let image = trimmedImage(baseKey, state: state).map {
+            ButtonArt.sized($0, cover: coverSize, backing: backingScale, mode: mode, surface: surface)
+        }
+        Self.artCache[key] = image
+        return image
+    }
+
+    // A circle the size of the system one, with the same 1pt margin.
+    private func defaultImage() -> NSImage {
+        let size = NSSize(width: coverSize + 2, height: coverSize + 2)
+        let image = NSImage(size: size)
+        image.lockFocus()
+
+        let color: NSColor
+        switch buttonType {
+        case .close: color = .systemRed
+        case .minimize: color = .systemYellow
+        case .zoom: color = .systemGreen
+        }
+
+        color.setFill()
+        let path = NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: coverSize, height: coverSize))
+        path.fill()
+
+        image.unlockFocus()
+        return image
+    }
+}
+
 // A non-activating panel, so clicking a button leaves Trois in the background
-// and the target app keeps focus, as the system buttons do.
-class OverlayWindow: NSPanel {
+// and the target app keeps focus, as the system buttons do. Floats above every
+// normal window and is clipped where others cover its target. Used when
+// SkyLight can't make a ButtonWindow.
+class OverlayWindow: NSPanel, TrafficLightOverlay {
     let buttonType: TrafficLightType
     var targetButton: AXUIElement?
     // Called on main when a press found targetButton gone, e.g. after Arc
@@ -903,10 +1063,15 @@ class OverlayWindow: NSPanel {
     // Called on main just before a click presses the button.
     var willPress: (() -> Void)?
     // What the button sits on, whose color it's drawn over.
-    var surface = TitleBarColor.Surface.titleBar {
-        didSet { if surface != oldValue { reloadImageForMouseState() } }
+    var surface: TitleBarColor.Surface {
+        get { picker.surface }
+        set {
+            guard newValue != picker.surface else { return }
+            picker.surface = newValue
+            reloadImageForMouseState()
+        }
     }
-    private var sizing: ButtonArt.Sizing { ButtonArt.Sizing.current }
+    private var picker: ButtonArtPicker
     private var trackingArea: NSTrackingArea?
     // A press started on this button and the mouse is still held.
     private var isMouseDown = false
@@ -920,32 +1085,22 @@ class OverlayWindow: NSPanel {
     }
     private var imageSize: NSSize = NSSize(width: 14, height: 14)
     private var buttonCenter: CGPoint = .zero
-    private var windowIsZoomed = false
     // Background windows show the theme's disabled art while the mouse is away.
     private var windowIsActive = true
-    // Diameter of the system button's circle, which images must cover. The
-    // system draws it 1pt inside the AX button frame: 14pt in a 16pt frame on
-    // macOS 27, 12pt before.
-    private var coverSize: CGFloat = 14
-    // Device pixels per point on the display under the button.
-    private var backingScale: CGFloat = NSScreen.main?.backingScaleFactor ?? 2
     // Set after a window-server move AppKit didn't see. AppKit's cached frame
     // keeps the old origin until syncAppKitFrame().
     private var appKitStale = false
     // Covered parts currently masked out, in view coordinates. Nil forces an update.
     private var clipRects: [CGRect]? = []
-    // Sized art by key, state, cover, scale and sizing mode, so hovering doesn't
-    // reload and reprocess files. Nil entries remember a missing image. Shared
-    // by every window's overlays, which show the same theme.
-    private static var artCache: [String: NSImage?] = [:]
 
-    /// Drops cached art after the theme's files changed.
-    static func clearArtCache() {
-        artCache.removeAll()
-    }
+    var serverID: CGWindowID { CGWindowID(windowNumber) }
+    // Panels float in their own band, so they aren't ordered against the target.
+    var orderAbove: CGWindowID = 0
+    var ordersAboveTarget: Bool { false }
 
     init(buttonType: TrafficLightType) {
         self.buttonType = buttonType
+        picker = ButtonArtPicker(buttonType: buttonType)
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 14, height: 14),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -1022,6 +1177,12 @@ class OverlayWindow: NSPanel {
         super.orderOut(sender)
     }
 
+    func hide() {
+        orderOut(nil)
+    }
+
+    func reorder() {}
+
     private func resetMouse() {
         guard isMouseDown || isMouseInside else { return }
         isMouseDown = false
@@ -1040,8 +1201,8 @@ class OverlayWindow: NSPanel {
     /// Update zoomed state - affects which images are shown for zoom button
     func setZoomedState(_ zoomed: Bool) {
         guard buttonType == .zoom else { return }
-        if windowIsZoomed != zoomed {
-            windowIsZoomed = zoomed
+        if picker.isZoomed != zoomed {
+            picker.isZoomed = zoomed
             // Reload image to show restore/maximize appropriately
             reloadImageForMouseState()
         }
@@ -1060,61 +1221,11 @@ class OverlayWindow: NSPanel {
     }
 
     private func loadImageForState(_ state: String) {
-        let baseKey: String
-        switch buttonType {
-        case .close: baseKey = "closeButton"
-        case .minimize: baseKey = "minimizeButton"
-        case .zoom:
-            // Use restore images when window is zoomed, maximize images otherwise
-            baseKey = windowIsZoomed ? "restoreButton" : "zoomButton"
+        guard let (image, sizes) = picker.pick(state) else { return }
+        imageView.image = image
+        if sizes {
+            updateImageSize(image.size)
         }
-
-        if let image = art(baseKey, state: state) {
-            imageView.image = image
-            // Update size based on image if this is a resting state
-            if state.isEmpty || state == "Disabled" {
-                updateImageSize(image.size)
-            }
-        } else if state == "Disabled" {
-            loadImageForState("")
-        } else if state.isEmpty {
-            // Fallback: try zoom button images if restore not available
-            if windowIsZoomed, let image = art("zoomButton", state: state) {
-                imageView.image = image
-                updateImageSize(image.size)
-                return
-            }
-            // Only fall back to default for normal state
-            let defaultImage = createDefaultImage()
-            imageView.image = defaultImage
-            updateImageSize(defaultImage.size)
-        }
-        // For hover/pressed, if no image, keep current image
-    }
-
-    /// The image for `baseKey` in `state`, trimmed to the box shared by all of
-    /// that button's states. Zoom and restore share one box.
-    private func trimmedImage(_ baseKey: String, state: String) -> NSImage? {
-        let defaults = UserDefaults.standard
-        let bases = buttonType == .zoom ? ["zoomButton", "restoreButton"] : [baseKey]
-        let states = ["", "Hover", "Pressed", "Disabled"]
-        let keys = bases.flatMap { base in states.map { base + $0 + "Image" } }
-        guard let index = keys.firstIndex(of: baseKey + state + "Image") else { return nil }
-        let trim = sizing != .original
-        return ButtonArt.load(keys.map { defaults.string(forKey: $0) }, trim: trim)[index]
-    }
-
-    /// The trimmed image, fitted over the system button's circle per the Buttons setting.
-    private func art(_ baseKey: String, state: String) -> NSImage? {
-        let mode = sizing
-        let disc = mode == .backdrop ? TitleBarColor.color(surface).map { "\($0)" } ?? "none" : ""
-        let key = "\(baseKey)\(state)|\(coverSize)|\(backingScale)|\(mode.rawValue)|\(disc)"
-        if let cached = Self.artCache[key] { return cached }
-        let image = trimmedImage(baseKey, state: state).map {
-            ButtonArt.sized($0, cover: coverSize, backing: backingScale, mode: mode, surface: surface)
-        }
-        Self.artCache[key] = image
-        return image
     }
 
     /// Scale of the display under the button. AppKit's own screen can be stale
@@ -1131,7 +1242,7 @@ class OverlayWindow: NSPanel {
 
     /// Rounds down to the device pixel grid so pixel art isn't resampled.
     private func snapped(_ value: CGFloat) -> CGFloat {
-        (value * backingScale).rounded(.down) / backingScale
+        (value * picker.backingScale).rounded(.down) / picker.backingScale
     }
 
     // File images arrive with size already set to their pixel dimensions.
@@ -1168,27 +1279,6 @@ class OverlayWindow: NSPanel {
         )
     }
 
-    // A circle the size of the system one, with the same 1pt margin.
-    private func createDefaultImage() -> NSImage {
-        let size = NSSize(width: coverSize + 2, height: coverSize + 2)
-        let image = NSImage(size: size)
-        image.lockFocus()
-
-        let color: NSColor
-        switch buttonType {
-        case .close: color = .systemRed
-        case .minimize: color = .systemYellow
-        case .zoom: color = .systemGreen
-        }
-
-        color.setFill()
-        let path = NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: coverSize, height: coverSize))
-        path.fill()
-
-        image.unlockFocus()
-        return image
-    }
-
     func updateFrame(_ frame: CGRect) {
         // Store center of button in AX coordinates (top-left origin)
         buttonCenter = CGPoint(
@@ -1200,9 +1290,9 @@ class OverlayWindow: NSPanel {
         // or it moved to a display with a different scale.
         let size = min(frame.width, frame.height) - 2
         let scale = currentBackingScale()
-        if (size > 0 && size != coverSize) || scale != backingScale {
-            if size > 0 { coverSize = size }
-            backingScale = scale
+        if (size > 0 && size != picker.coverSize) || scale != picker.backingScale {
+            if size > 0 { picker.coverSize = size }
+            picker.backingScale = scale
             reloadImageForMouseState()
         }
 
