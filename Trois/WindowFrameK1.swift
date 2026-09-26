@@ -65,11 +65,10 @@ extension WindowFrame {
         return out
     }
 
-    func renderK1(_ parts: K1Parts, windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>,
-                  title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat) -> (CGImage, Layout)? {
+    func drawK1(_ parts: K1Parts, into context: CGContext, windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>,
+                title: String?, pressedWidget: Widget?, cornerRadius: CGFloat) -> Layout {
         let i = Self.k1Insets
-        let size = CGSize(width: windowSize.width + i.left + i.right, height: windowSize.height + i.top + i.bottom)
-        guard let context = Self.frameContext(size: size, scale: scale) else { return nil }
+        let size = outerSize(windowSize)
 
         let icon = isActive ? active : inactive
         let W = size.width, H = size.height, b = CGFloat(Self.k1Border)
@@ -143,10 +142,7 @@ extension WindowFrame {
             drawTitle(title, in: titleRect, style: titleStyle, context: context)
         }
 
-        guard let result = context.makeImage() else { return nil }
-        var layout = Layout(size: size, widgets: widgetRects, title: titleRect)
-        layout.shape = drawnShape(of: context, scale: scale, size: size, hole: hole)
-        return (result, layout)
+        return Layout(size: size, widgets: widgetRects, title: titleRect)
     }
 
     /// Draws the left half of the stripes icon at the start of `rect`, the right

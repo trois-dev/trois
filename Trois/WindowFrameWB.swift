@@ -102,11 +102,10 @@ extension WindowFrame {
         return CGRect(x: x, y: y, width: s.width, height: s.height)
     }
 
-    func renderWB(_ parts: WBParts, windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>, hidden: Set<Widget>,
-                  title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat) -> (CGImage, Layout)? {
+    func drawWB(_ parts: WBParts, into context: CGContext, windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>,
+                hidden: Set<Widget>, title: String?, pressedWidget: Widget?, cornerRadius: CGFloat) -> Layout {
         let i = parts.insets
-        let size = CGSize(width: windowSize.width + i.left + i.right, height: windowSize.height + i.top + i.bottom)
-        guard let context = Self.frameContext(size: size, scale: scale) else { return nil }
+        let size = outerSize(windowSize)
 
         let W = size.width, H = size.height
         for side in [Side.left, .right, .top, .bottom] {
@@ -161,10 +160,7 @@ extension WindowFrame {
             }
         }
 
-        guard let result = context.makeImage() else { return nil }
-        var layout = Layout(size: size, widgets: widgetRects, title: titleRect)
-        layout.shape = drawnShape(of: context, scale: scale, size: size, hole: hole)
-        return (result, layout)
+        return Layout(size: size, widgets: widgetRects, title: titleRect)
     }
 
     /// Fixed start, tiled or stretched middle, fixed end, along the edge.

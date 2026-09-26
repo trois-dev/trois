@@ -83,7 +83,7 @@ final class BorderWindow {
     private var shapeSize: CGSize = .zero
     private var context: CGContext?
     // Where the last art went in the context, cleared before the next.
-    private var drawnRect: CGRect = .zero
+    private var drawnRects: [CGRect] = []
     private var isLiveResizing = false
     private var liveResizeEnd: DispatchWorkItem?
     // Shapes are rounded up to this many points.
@@ -298,26 +298,88 @@ final class BorderWindow {
         isVisible = true
     }
 
+    // What a render needs, read on main so it can run elsewhere.
+    private struct RenderJob {
+        let frame: WindowFrame
+        let windowSize: CGSize
+        let active: Bool
+        let widgets: Set<WindowFrame.Widget>
+        let hidden: Set<WindowFrame.Widget>
+        let title: String?
+        let pressed: WindowFrame.Widget?
+        let cornerRadius: CGFloat
+        let exactShape: Bool
+        let serial: Int
+
+        func run() -> (CGImage, WindowFrame.Layout)? {
+            frame.render(windowSize: windowSize, active: active, widgets: widgets, hidden: hidden, title: title,
+                         pressedWidget: pressed, cornerRadius: cornerRadius, scale: BorderWindow.scale, exactShape: exactShape)
+        }
+    }
+
+    // Live resizes render here, leaving main free for events and presenting.
+    private static let renderQueue = DispatchQueue(label: "com.trois.app.border-render", qos: .userInteractive)
+    // Each redraw gets a serial; a render older than what's shown is dropped.
+    private var requestSerial = 0
+    private var shownSerial = 0
+    private var renderInFlight = false
+    private var renderWanted = false
+
+    private func makeJob() -> RenderJob {
+        RenderJob(frame: windowFrame, windowSize: targetFrame.size, active: isActive, widgets: target?.widgets ?? [],
+                  hidden: target?.hiddenWidgets ?? [], title: target?.title, pressed: pressedWidget,
+                  cornerRadius: cornerRadius, exactShape: !isLiveResizing, serial: requestSerial)
+    }
+
+    // During a live resize the art renders in the background, one render at
+    // a time, the newest size winning. Otherwise it renders here, so presses
+    // and focus changes show at once.
     private func redraw() {
         guard !closed, targetFrame.width > 0, targetFrame.height > 0 else { return }
-        guard let (image, layout) = windowFrame.render(
-            windowSize: targetFrame.size, active: isActive, widgets: target?.widgets ?? [],
-            hidden: target?.hiddenWidgets ?? [],
-            title: target?.title, pressedWidget: pressedWidget,
-            cornerRadius: cornerRadius, scale: Self.scale
-        ) else { return }
-        let oldShape = self.layout?.shape
-        self.layout = layout
-        layoutWidgets = target.map { [$0.widgets, $0.hiddenWidgets] }
+        requestSerial += 1
+        if isLiveResizing {
+            renderWanted = true
+            startRender()
+            return
+        }
+        let job = makeJob()
+        guard let (image, layout) = job.run() else { return }
+        present(image, layout: layout, windowSize: job.windowSize, serial: job.serial)
+    }
+
+    private func startRender() {
+        guard renderWanted, !renderInFlight else { return }
+        renderWanted = false
+        renderInFlight = true
+        let job = makeJob()
+        Self.renderQueue.async { [weak self] in
+            let result = job.run()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.renderInFlight = false
+                if let (image, layout) = result, !self.closed {
+                    self.present(image, layout: layout, windowSize: job.windowSize, serial: job.serial)
+                }
+                self.startRender()
+            }
+        }
+    }
+
+    // Puts a render on screen. `windowSize` is the size it was rendered for,
+    // which may already be a frame behind the window.
+    private func present(_ image: CGImage, layout: WindowFrame.Layout, windowSize: CGSize, serial: Int) {
+        guard serial > shownSerial else { return }
+        shownSerial = serial
         let cid = SkyLight.cid
+        let size = windowFrame.outerSize(windowSize)
         // The art sits at the shape's top left and the rest stays clear. The
         // shape is rounded up, with extra room during a live resize, and only
         // changes when the art outgrows it or, at rest, has room to spare.
         let step = Self.shapeStep
         func rounded(_ v: CGFloat) -> CGFloat { ceil(v / step) * step }
         let room = isLiveResizing ? 1 + Self.liveResizeRoom : 1
-        let wanted = CGSize(width: rounded(layout.size.width * room), height: rounded(layout.size.height * room))
-        let outgrown = layout.size.width > shapeSize.width || layout.size.height > shapeSize.height
+        let wanted = CGSize(width: rounded(size.width * room), height: rounded(size.height * room))
+        let outgrown = size.width > shapeSize.width || size.height > shapeSize.height
         let spare = !isLiveResizing && shapeSize != wanted
         let reshape = outgrown || spare
 
@@ -339,20 +401,44 @@ final class BorderWindow {
         }
         if let context {
             // The context's origin is the bottom left, so the art is raised to
-            // the top. Copy replaces every pixel it covers, transparent ones
-            // included; what the last art covered outside it is cleared.
+            // the top. Only the bands around the window and the corner fills
+            // are touched; the window's own area stays clear. What the last art
+            // covered is cleared first, as the window may have grown over it.
+            let art = CGRect(x: 0, y: shapeSize.height - size.height, width: size.width, height: size.height)
+            let i = windowFrame.insets
+            let hole = CGRect(x: i.left, y: i.top, width: windowSize.width, height: windowSize.height)
+            let r = min(cornerRadius, hole.width / 2, hole.height / 2)
+            let corners = r > 0 ? [CGRect(x: hole.minX, y: hole.minY, width: r, height: r),
+                                   CGRect(x: hole.maxX - r, y: hole.minY, width: r, height: r),
+                                   CGRect(x: hole.minX, y: hole.maxY - r, width: r, height: r),
+                                   CGRect(x: hole.maxX - r, y: hole.maxY - r, width: r, height: r)] : []
+            let pieces = WindowFrame.bands(around: hole, size: size) + corners
+            // Layout rects are top-left points; flip them into the context.
+            let rects = pieces.map { CGRect(x: $0.minX, y: art.maxY - $0.maxY, width: $0.width, height: $0.height) }
+            context.saveGState()
+            // One fill clears every old rect, cheaper than a clear per rect.
+            context.setBlendMode(.clear)
+            context.addRects(reshape ? [CGRect(origin: .zero, size: shapeSize)] : drawnRects)
+            context.fillPath()
+            // Each piece is copied from its own crop of the image, so only its
+            // pixels are read; a clipped draw of the whole image reads them all.
             context.setBlendMode(.copy)
-            let art = CGRect(x: 0, y: shapeSize.height - layout.size.height, width: layout.size.width, height: layout.size.height)
-            if reshape {
-                context.clear(CGRect(origin: .zero, size: shapeSize))
-            } else if !art.contains(drawnRect) {
-                context.clear(drawnRect)
+            let scale = Self.scale
+            for (piece, rect) in zip(pieces, rects) {
+                let source = CGRect(x: piece.minX * scale, y: piece.minY * scale,
+                                    width: piece.width * scale, height: piece.height * scale).integral
+                if let crop = image.cropping(to: source) {
+                    context.draw(crop, in: rect)
+                }
             }
-            context.draw(image, in: art)
-            drawnRect = art
+            context.restoreGState()
+            drawnRects = rects
             context.flush()
             _ = SkyLight.flushWindow?(cid, windowNumber, nil)
         }
+        let oldShape = self.layout?.shape
+        self.layout = layout
+        layoutWidgets = target.map { [$0.widgets, $0.hiddenWidgets] }
         // A hidden border keeps its new shape off screen until placed.
         if reshape && isVisible {
             place()
@@ -362,7 +448,7 @@ final class BorderWindow {
             _ = SkyLight.reenableUpdate?(cid)
         }
         if reshape || oldShape != layout.shape {
-            updateEventShape()
+            updateEventShape(windowSize: windowSize)
         }
         if oldShape != layout.shape {
             shapeChanged?()
@@ -381,9 +467,9 @@ final class BorderWindow {
         shapeSize = size
     }
 
-    private func updateEventShape() {
+    private func updateEventShape(windowSize: CGSize) {
         let i = windowFrame.insets
-        let hole = CGRect(x: i.left, y: i.top, width: targetFrame.width, height: targetFrame.height)
+        let hole = CGRect(x: i.left, y: i.top, width: windowSize.width, height: windowSize.height)
         // Only drawn parts take clicks; transparent ones pass them through.
         // An empty shape takes none.
         _ = WindowServer.setEventShape(of: windowNumber, include: shape, exclude: [hole])

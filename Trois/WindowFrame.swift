@@ -794,20 +794,45 @@ struct WindowFrame {
     /// `cornerRadius` is the window's own corner rounding; the gaps it leaves
     /// against the frame's square opening are filled in. `hidden` are widgets
     /// the window has whose buttons draw elsewhere, at the traffic lights.
+    /// Without `exactShape` the layout's shape is the four bands around the
+    /// window, which skips a pass over the pixels.
     func render(windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>, hidden: Set<Widget> = [],
-                title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat) -> (CGImage, Layout)? {
+                title: String?, pressedWidget: Widget?, cornerRadius: CGFloat, scale: CGFloat,
+                exactShape: Bool = true) -> (CGImage, Layout)? {
+        let size = outerSize(windowSize)
+        guard let context = Self.frameContext(size: size, scale: scale) else { return nil }
+        var layout = draw(into: context, windowSize: windowSize, active: isActive, widgets: widgets, hidden: hidden,
+                          title: title, pressedWidget: pressedWidget, cornerRadius: cornerRadius)
+        guard let image = context.makeImage() else { return nil }
+        let i = insets
+        let hole = CGRect(x: i.left, y: i.top, width: windowSize.width, height: windowSize.height)
+        layout.shape = exactShape ? drawnShape(of: context, scale: scale, size: size, hole: hole)
+                                  : Self.bands(around: hole, size: size)
+        return (image, layout)
+    }
+
+    /// The frame's full size around a window of `windowSize` points.
+    func outerSize(_ windowSize: CGSize) -> CGSize {
+        let i = insets
+        return CGSize(width: windowSize.width + i.left + i.right, height: windowSize.height + i.top + i.bottom)
+    }
+
+    /// Draws the frame into `context`, whose transform takes top-left points
+    /// of the frame's outerSize, and leaves the window's own area untouched.
+    /// The layout it returns has no shape.
+    func draw(into context: CGContext, windowSize: CGSize, active isActive: Bool, widgets: Set<Widget>,
+              hidden: Set<Widget> = [], title: String?, pressedWidget: Widget?, cornerRadius: CGFloat) -> Layout {
         if let wb {
-            return renderWB(wb, windowSize: windowSize, active: isActive, widgets: widgets, hidden: hidden, title: title,
-                            pressedWidget: pressedWidget, cornerRadius: cornerRadius, scale: scale)
+            return drawWB(wb, into: context, windowSize: windowSize, active: isActive, widgets: widgets, hidden: hidden,
+                          title: title, pressedWidget: pressedWidget, cornerRadius: cornerRadius)
         }
         if let k1 {
-            return renderK1(k1, windowSize: windowSize, active: isActive, widgets: widgets, title: title,
-                            pressedWidget: pressedWidget, cornerRadius: cornerRadius, scale: scale)
+            return drawK1(k1, into: context, windowSize: windowSize, active: isActive, widgets: widgets, title: title,
+                          pressedWidget: pressedWidget, cornerRadius: cornerRadius)
         }
         let titleStyle = resolvedTitle(active: isActive)
         let titleWidth = title.map { titleStyle.width(of: $0) + 8 }
         let layout = layout(windowSize: windowSize, widgets: widgets, hidden: hidden, titleWidth: titleWidth)
-        guard let context = Self.frameContext(size: layout.size, scale: scale) else { return nil }
 
         let image = isActive ? active : inactive
         let outer = layout.size
@@ -835,11 +860,7 @@ struct WindowFrame {
         if let title, let rect = layout.title {
             drawTitle(title, in: rect, style: titleStyle, context: context)
         }
-
-        guard let result = context.makeImage() else { return nil }
-        var drawn = layout
-        drawn.shape = drawnShape(of: context, scale: scale, size: layout.size, hole: hole)
-        return (result, drawn)
+        return layout
     }
 
     /// A bitmap for a frame `size` points big at `scale` pixels per point,
@@ -865,6 +886,14 @@ struct WindowFrame {
         context.addRect(CGRect(origin: .zero, size: size))
         context.addRect(hole)
         context.clip(using: .evenOdd)
+    }
+
+    /// The four rects of `size` around `hole`, all top-left points.
+    static func bands(around hole: CGRect, size: CGSize) -> [CGRect] {
+        [CGRect(x: 0, y: 0, width: size.width, height: hole.minY),
+         CGRect(x: 0, y: hole.maxY, width: size.width, height: size.height - hole.maxY),
+         CGRect(x: 0, y: hole.minY, width: hole.minX, height: hole.height),
+         CGRect(x: hole.maxX, y: hole.minY, width: size.width - hole.maxX, height: hole.height)].filter { !$0.isEmpty }
     }
 
     // Past this many rects the shape is merged in bands of rows, trading
