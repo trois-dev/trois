@@ -31,6 +31,8 @@ struct WindowSnapshot {
     let zoomButton: AXUIElement?
     let isFullScreen: Bool
     let title: String?
+    // What the buttons sit on, whose color TitleBarColor knows.
+    let surface: TitleBarColor.Surface
 
     var buttonElements: [AXUIElement] {
         [closeButton, minimizeButton, zoomButton].compactMap { $0 }
@@ -65,6 +67,8 @@ class OverlayManager {
     private var removed = false
     // A press that hit a stale button element, retried after the next read.
     private var pendingPress: TrafficLightType?
+    // From the last read; see WindowSnapshot.
+    private var surface = TitleBarColor.Surface.titleBar
     // Called on main after each refresh() is applied, with whether the button
     // offsets changed.
     var didRefresh: ((WindowRead, Bool) -> Void)?
@@ -98,10 +102,11 @@ class OverlayManager {
             )
             let fullScreen = try value(of: window, "AXFullScreen") as? Bool ?? false
             let title = try value(of: window, kAXTitleAttribute) as? String
+            let surface = try surface(of: window, buttons: buttons, elements: [close, minimize, zoom].compactMap { $0 })
             return .window(WindowSnapshot(
                 window: window, frame: frame, buttons: buttons,
                 closeButton: close, minimizeButton: minimize, zoomButton: zoom,
-                isFullScreen: fullScreen, title: title
+                isFullScreen: fullScreen, title: title, surface: surface
             ))
         } catch {
             return .timedOut
@@ -289,6 +294,7 @@ class OverlayManager {
     private func makeOverlay(_ type: TrafficLightType) -> OverlayWindow {
         let overlay = OverlayWindow(buttonType: type)
         overlay.setWindowActive(isActive)
+        overlay.surface = surface
         overlay.pressFailed = { [weak self] in
             guard let self else { return }
             self.pendingPress = type
@@ -334,6 +340,55 @@ class OverlayManager {
     private struct AXTimedOut: Error {}
 
     // Nil when the attribute is missing. Throws when the app didn't answer.
+    /// What the buttons sit on, from what reaches under them: left of close,
+    /// between close and minimize, and just below close. Nothing but the
+    /// toolbar there is the title bar. A split view counts only where one of
+    /// its panes spans the buttons, as a sidebar does; a pane further right,
+    /// like Preview's image, leaves the title bar showing. Anything else there,
+    /// like SwiftUI and iPad app content, sits on sidebar material. Matched
+    /// against captures of a dozen apps. The window's own children are
+    /// searched rather than the screen, which would find our overlays first.
+    /// Electron and Arc draw their own title bars, closest to the plain one.
+    private static func surface(of window: AXUIElement, buttons: ButtonFrames, elements: [AXUIElement]) throws -> TitleBarColor.Surface {
+        guard let close = buttons.close else { return .titleBar }
+        var pid: pid_t = 0
+        if AXUIElementGetPid(window, &pid) == .success, drawsOwnTitleBar(pid) { return .titleBar }
+        let gap = buttons.minimize.map { CGPoint(x: (close.maxX + $0.minX) / 2, y: close.midY) }
+            ?? CGPoint(x: close.maxX + 3, y: close.midY)
+        let points = [CGPoint(x: close.minX - 4, y: close.midY), gap, CGPoint(x: close.midX, y: close.maxY + 3)]
+        let children = try value(of: window, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        for child in children where !elements.contains(where: { CFEqual($0, child) }) {
+            let role = try value(of: child, kAXRoleAttribute) as? String
+            guard role != kAXToolbarRole, let frame = try axFrame(of: child), points.contains(where: frame.contains) else { continue }
+            guard role == kAXSplitGroupRole else { return .sidebar }
+            // Panes start below the title bar, so only their columns are compared.
+            let panes = try value(of: child, kAXChildrenAttribute) as? [AXUIElement] ?? []
+            for pane in panes where try value(of: pane, kAXRoleAttribute) as? String != kAXSplitterRole {
+                guard let paneFrame = try axFrame(of: pane) else { continue }
+                if points.contains(where: { $0.x >= paneFrame.minX && $0.x < paneFrame.maxX }) { return .sidebar }
+            }
+        }
+        return .titleBar
+    }
+
+    // Frameworks of apps that draw their title bars themselves.
+    private static let ownTitleBarFrameworks = ["Electron Framework.framework", "ArcCore.framework"]
+    private static var ownTitleBar: [pid_t: Bool] = [:]
+    private static let ownTitleBarLock = NSLock()
+
+    // Runs on AXQueue; cached per process.
+    private static func drawsOwnTitleBar(_ pid: pid_t) -> Bool {
+        ownTitleBarLock.lock()
+        defer { ownTitleBarLock.unlock() }
+        if let known = ownTitleBar[pid] { return known }
+        let frameworks = NSRunningApplication(processIdentifier: pid)?.bundleURL?
+            .appendingPathComponent("Contents/Frameworks")
+        let names = frameworks.flatMap { try? FileManager.default.contentsOfDirectory(atPath: $0.path) } ?? []
+        let own = names.contains(where: ownTitleBarFrameworks.contains)
+        ownTitleBar[pid] = own
+        return own
+    }
+
     private static func value(of element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
         var ref: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &ref)
@@ -358,6 +413,10 @@ class OverlayManager {
 
     private func updateOverlays(for snapshot: WindowSnapshot) {
         currentWindow = snapshot.window
+        surface = snapshot.surface
+        for overlay in [closeOverlay, minimizeOverlay, zoomOverlay] {
+            overlay?.surface = surface
+        }
         let zoomed = snapshot.isFullScreen || fillsScreen(targetFrame)
 
         if let offset = offsets.close {
@@ -575,7 +634,8 @@ enum ButtonArt {
     /// Fits `image` (1px = 1pt) over a system circle `cover` points wide on a
     /// display with `backing` device pixels per point. Art that already covers
     /// it comes back unchanged.
-    static func sized(_ image: NSImage, cover: CGFloat, backing: CGFloat, mode: Sizing) -> NSImage {
+    static func sized(_ image: NSImage, cover: CGFloat, backing: CGFloat, mode: Sizing,
+                      surface: TitleBarColor.Surface = .titleBar) -> NSImage {
         let size = image.size
         guard size.width > 0, size.height > 0,
               size.width < cover || size.height < cover else { return image }
@@ -593,7 +653,7 @@ enum ButtonArt {
                 return true
             }
         case .backdrop:
-            if let color = TitleBarColor.current {
+            if let color = TitleBarColor.color(surface) {
                 return onDisc(image, cover: cover, backing: backing, color: color)
             }
             // Until the color has been read, the art fills the gaps instead.
@@ -604,16 +664,22 @@ enum ButtonArt {
         }
     }
 
-    /// The art at its own size, centered on a disc of `color` a point wider
-    /// than the system button's circle, so its antialiased rim is covered too.
-    /// The art stays on whole device pixels.
+    /// The art at its own size, centered on a disc of `color` that's solid a
+    /// point past the system button's circle and fades out over the next 2.5
+    /// points, where the button's soft rim tints the title bar. The fade hides
+    /// the rim and blends a disc a few levels off the title bar's real color,
+    /// as on translucent sidebars. The art stays on whole device pixels.
     private static func onDisc(_ image: NSImage, cover: CGFloat, backing: CGFloat, color: NSColor) -> NSImage {
-        let disc = cover + 2
-        let size = NSSize(width: max(image.size.width, disc), height: max(image.size.height, disc))
+        let solid = cover / 2 + 1, outer = solid + 2.5
+        let size = NSSize(width: max(image.size.width, 2 * outer), height: max(image.size.height, 2 * outer))
         func snapped(_ v: CGFloat) -> CGFloat { (v * backing).rounded(.down) / backing }
         return NSImage(size: size, flipped: false) { rect in
-            color.setFill()
-            NSBezierPath(ovalIn: NSRect(x: (size.width - disc) / 2, y: (size.height - disc) / 2, width: disc, height: disc)).fill()
+            guard let context = NSGraphicsContext.current?.cgContext,
+                  let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                            colors: [color.cgColor, color.cgColor, color.withAlphaComponent(0).cgColor] as CFArray,
+                                            locations: [0, solid / outer, 1]) else { return false }
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            context.drawRadialGradient(gradient, startCenter: center, startRadius: 0, endCenter: center, endRadius: outer, options: [])
             NSGraphicsContext.current?.imageInterpolation = .none
             image.draw(in: NSRect(x: snapped((size.width - image.size.width) / 2), y: snapped((size.height - image.size.height) / 2),
                                   width: image.size.width, height: image.size.height))
@@ -723,14 +789,19 @@ enum ButtonArt {
     }
 }
 
-/// The color behind the traffic lights of a standard window, in the current
-/// appearance. Other apps' windows can't be read without Screen Recording
-/// permission, but our own can, so it's read from an off-screen window of
-/// ours. Title bars are one flat color around the buttons, focused or not.
+/// The color behind the traffic lights, in the current appearance, on a plain
+/// title bar or on a sidebar that reaches under the buttons. Other apps'
+/// windows can't be read without Screen Recording permission, but our own
+/// can, so each is read from an off-screen window of ours. Both are one flat
+/// color around the buttons, focused or not.
 enum TitleBarColor {
-    private static var colors: [Bool: NSColor] = [:]
+    enum Surface { case titleBar, sidebar }
 
-    static var current: NSColor? { colors[isDark] }
+    private static var colors: [String: NSColor] = [:]
+
+    static func color(_ surface: Surface) -> NSColor? { colors[key(surface, dark: isDark)] }
+
+    private static func key(_ surface: Surface, dark: Bool) -> String { "\(surface)-\(dark)" }
 
     private static var isDark: Bool {
         NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -746,28 +817,57 @@ enum TitleBarColor {
     private static let createImage: CreateImageFn? = dlsym(dlopen(nil, RTLD_NOW), "CGWindowListCreateImage")
         .map { unsafeBitCast($0, to: CreateImageFn.self) }
 
-    /// Reads both appearances' colors, then calls `done` on main.
+    /// Reads every surface in both appearances, then calls `done` on main.
     static func read(done: @escaping () -> Void) {
-        var pending = 2
+        var pending = 4
         for dark in [false, true] {
-            let window = OffscreenWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
-                                         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-            window.isReleasedWhenClosed = false
-            window.orderFrontRegardless()
-            window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
-            // The window server needs a moment to draw it.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                if let color = sample(window) { colors[dark] = color }
-                window.orderOut(nil)
-                pending -= 1
-                if pending == 0 { done() }
+            for surface in [Surface.titleBar, .sidebar] {
+                let (window, point) = referenceWindow(surface)
+                window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                window.orderFrontRegardless()
+                window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
+                // The window server needs a moment to draw it.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    if let color = sample(window, at: point) { colors[key(surface, dark: dark)] = color }
+                    window.orderOut(nil)
+                    pending -= 1
+                    if pending == 0 { done() }
+                }
             }
         }
     }
 
-    // The pixel 100 pt in and 10 pt down, in the title bar, clear of the buttons.
-    private static func sample(_ window: NSWindow) -> NSColor? {
+    // A window with the surface under its buttons, and a point on it clear of
+    // them, in top-left points.
+    private static func referenceWindow(_ surface: Surface) -> (NSWindow, CGPoint) {
+        switch surface {
+        case .titleBar:
+            let window = OffscreenWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
+                                         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            return (window, CGPoint(x: 100, y: 10))
+        case .sidebar:
+            // A sidebar split view under a unified toolbar, as Finder and Notes have.
+            let window = OffscreenWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                                         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                         backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            let split = NSSplitViewController()
+            let sidebar = NSViewController(), main = NSViewController()
+            sidebar.view = NSView(frame: NSRect(x: 0, y: 0, width: 180, height: 200))
+            main.view = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 200))
+            split.addSplitViewItem(NSSplitViewItem(sidebarWithViewController: sidebar))
+            split.addSplitViewItem(NSSplitViewItem(viewController: main))
+            window.contentViewController = split
+            window.setContentSize(NSSize(width: 400, height: 200))
+            window.titlebarAppearsTransparent = true
+            window.toolbar = NSToolbar(identifier: "Trois.TitleBarColor")
+            window.toolbarStyle = .unified
+            return (window, CGPoint(x: 10, y: 26))
+        }
+    }
+
+    private static func sample(_ window: NSWindow, at point: CGPoint) -> NSColor? {
         guard let createImage, let image = createImage(.null, 8, UInt32(window.windowNumber), 1)?.takeRetainedValue(),
               window.frame.width > 0 else { return nil }
         let scale = CGFloat(image.width) / window.frame.width
@@ -775,7 +875,7 @@ enum TitleBarColor {
         guard let context = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        context.draw(image, in: CGRect(x: -100 * scale, y: -(CGFloat(image.height) - 10 * scale),
+        context.draw(image, in: CGRect(x: -point.x * scale, y: -(CGFloat(image.height) - point.y * scale),
                                        width: CGFloat(image.width), height: CGFloat(image.height)))
         guard pixel[3] == 255 else { return nil }
         return NSColor(srgbRed: CGFloat(pixel[0]) / 255, green: CGFloat(pixel[1]) / 255, blue: CGFloat(pixel[2]) / 255, alpha: 1)
@@ -802,6 +902,11 @@ class OverlayWindow: NSPanel {
     var pressAll: (() -> Void)?
     // Called on main just before a click presses the button.
     var willPress: (() -> Void)?
+    // What the button sits on, whose color it's drawn over.
+    var surface = TitleBarColor.Surface.titleBar {
+        didSet { if surface != oldValue { reloadImageForMouseState() } }
+    }
+    private var sizing: ButtonArt.Sizing { ButtonArt.Sizing.current }
     private var trackingArea: NSTrackingArea?
     // A press started on this button and the mouse is still held.
     private var isMouseDown = false
@@ -995,18 +1100,18 @@ class OverlayWindow: NSPanel {
         let states = ["", "Hover", "Pressed", "Disabled"]
         let keys = bases.flatMap { base in states.map { base + $0 + "Image" } }
         guard let index = keys.firstIndex(of: baseKey + state + "Image") else { return nil }
-        let trim = ButtonArt.Sizing.current != .original
+        let trim = sizing != .original
         return ButtonArt.load(keys.map { defaults.string(forKey: $0) }, trim: trim)[index]
     }
 
     /// The trimmed image, fitted over the system button's circle per the Buttons setting.
     private func art(_ baseKey: String, state: String) -> NSImage? {
-        let mode = ButtonArt.Sizing.current
-        let disc = mode == .backdrop ? TitleBarColor.current.map { "\($0)" } ?? "none" : ""
+        let mode = sizing
+        let disc = mode == .backdrop ? TitleBarColor.color(surface).map { "\($0)" } ?? "none" : ""
         let key = "\(baseKey)\(state)|\(coverSize)|\(backingScale)|\(mode.rawValue)|\(disc)"
         if let cached = Self.artCache[key] { return cached }
         let image = trimmedImage(baseKey, state: state).map {
-            ButtonArt.sized($0, cover: coverSize, backing: backingScale, mode: mode)
+            ButtonArt.sized($0, cover: coverSize, backing: backingScale, mode: mode, surface: surface)
         }
         Self.artCache[key] = image
         return image
