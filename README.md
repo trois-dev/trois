@@ -22,6 +22,12 @@ Made by [sryo](https://github.com/sryo). Not affiliated with the original tools 
 
 Download the zip from [Releases](https://github.com/trois-dev/trois/releases), unzip it, move Trois.app to Applications and give it Accessibility permission when asked. Trois needs macOS 13 or later on Apple silicon.
 
+Or install it with [Homebrew](https://github.com/trois-dev/homebrew-tap):
+
+```sh
+brew install --cask trois-dev/tap/trois
+```
+
 ## Modes
 
 | Mode | Requirements | Description |
