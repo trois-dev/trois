@@ -855,15 +855,22 @@ class MultiWindowTracker {
         return windows
     }
 
-    // Matches by window id, falling back to frame for windows that don't expose one.
+    // Matches by window id, falling back to frame for windows that don't expose
+    // one. The fallback must be unambiguous: maximized or tiled windows of one
+    // app, some on other Spaces, often share a frame, and a guess would theme
+    // the wrong one.
     private static func matchAXWindow(wid: CGWindowID, frame: CGRect, in windows: [AXUIElement]) -> AXUIElement? {
+        var withoutID: [AXUIElement] = []
         for window in windows {
             var windowID: CGWindowID = 0
-            if _AXUIElementGetWindow(window, &windowID) == .success, windowID == wid {
-                return window
+            if _AXUIElementGetWindow(window, &windowID) == .success, windowID != 0 {
+                if windowID == wid { return window }
+            } else {
+                withoutID.append(window)
             }
         }
-        for window in windows {
+        var match: AXUIElement?
+        for window in withoutID {
             var posRef: CFTypeRef?
             var sizeRef: CFTypeRef?
             guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posRef) == .success,
@@ -878,10 +885,11 @@ class MultiWindowTracker {
             // Match with some tolerance for frame differences
             if abs(pos.x - frame.minX) < 5 && abs(pos.y - frame.minY) < 5 &&
                abs(size.width - frame.width) < 5 && abs(size.height - frame.height) < 5 {
-                return window
+                guard match == nil else { return nil }
+                match = window
             }
         }
-        return nil
+        return match
     }
 
     // MARK: - Appearance
