@@ -1,0 +1,25 @@
+# Builds Trois and runs its tests on every push and pull request.
+# Signing is off: the project signs with the maintainer's Developer ID, which CI doesn't have.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The app icon is an Icon Composer .icon, which needs Xcode 26.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Test
+        run: |
+          xcodebuild -project Trois.xcodeproj -scheme Trois -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath build \
+            test CODE_SIGNING_ALLOWED=NO
