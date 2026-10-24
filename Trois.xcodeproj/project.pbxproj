@@ -30,7 +30,20 @@
 		E1000001 /* ThemeEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000002; };
 		E1000003 /* ThemeDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000004; };
 		B19F0A01 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = B19F0A02 /* AppIcon.icon */; };
+		F1000001 /* WindowFrameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000002; };
+		F1000003 /* ThemeInstallerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000004; };
+		F1000005 /* Fixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000006; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		F1000041 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000008 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A100000A;
+			remoteInfo = Trois;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		A1000010 /* Trois.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Trois.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -59,10 +72,21 @@
 		E1000002 /* ThemeEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeEditor.swift; sourceTree = "<group>"; };
 		E1000004 /* ThemeDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeDraft.swift; sourceTree = "<group>"; };
 		B19F0A02 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Design/Icon/AppIcon.icon; sourceTree = "<group>"; };
+		F1000010 /* TroisTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TroisTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1000002 /* WindowFrameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFrameTests.swift; sourceTree = "<group>"; };
+		F1000004 /* ThemeInstallerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeInstallerTests.swift; sourceTree = "<group>"; };
+		F1000006 /* Fixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fixtures.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A100000D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F100000D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -76,6 +100,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000020 /* Trois */,
+				F1000020 /* TroisTests */,
 				B19F0A02 /* AppIcon.icon */,
 				A100000F /* Products */,
 			);
@@ -85,6 +110,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000010 /* Trois.app */,
+				F1000010 /* TroisTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -120,6 +146,16 @@
 			path = Trois;
 			sourceTree = "<group>";
 		};
+		F1000020 /* TroisTests */ = {
+			isa = PBXGroup;
+			children = (
+				F1000006 /* Fixtures.swift */,
+				F1000002 /* WindowFrameTests.swift */,
+				F1000004 /* ThemeInstallerTests.swift */,
+			);
+			path = TroisTests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -140,6 +176,23 @@
 			productReference = A1000010 /* Trois.app */;
 			productType = "com.apple.product-type.application";
 		};
+		F100000A /* TroisTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F1000030 /* Build configuration list for PBXNativeTarget "TroisTests" */;
+			buildPhases = (
+				F100000B /* Sources */,
+				F100000D /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F1000040 /* PBXTargetDependency */,
+			);
+			name = TroisTests;
+			productName = TroisTests;
+			productReference = F1000010 /* TroisTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -152,6 +205,10 @@
 				TargetAttributes = {
 					A100000A = {
 						CreatedOnToolsVersion = 15.0;
+					};
+					F100000A = {
+						CreatedOnToolsVersion = 15.0;
+						TestTargetID = A100000A;
 					};
 				};
 			};
@@ -169,6 +226,7 @@
 			projectRoot = "";
 			targets = (
 				A100000A /* Trois */,
+				F100000A /* TroisTests */,
 			);
 		};
 /* End PBXProject section */
@@ -214,7 +272,25 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F100000B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F1000005 /* Fixtures.swift in Sources */,
+				F1000001 /* WindowFrameTests.swift in Sources */,
+				F1000003 /* ThemeInstallerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		F1000040 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A100000A /* Trois */;
+			targetProxy = F1000041 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A1000031 /* Debug */ = {
@@ -383,6 +459,34 @@
 			};
 			name = Release;
 		};
+		F1000033 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.trois.app.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Trois.app/Contents/MacOS/Trois";
+			};
+			name = Debug;
+		};
+		F1000034 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.trois.app.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Trois.app/Contents/MacOS/Trois";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -400,6 +504,15 @@
 			buildConfigurations = (
 				A1000033 /* Debug */,
 				A1000034 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F1000030 /* Build configuration list for PBXNativeTarget "TroisTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F1000033 /* Debug */,
+				F1000034 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

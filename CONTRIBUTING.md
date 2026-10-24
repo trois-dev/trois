@@ -18,6 +18,14 @@ Requires Xcode and macOS 13 or later.
 1. Open `Trois.xcodeproj` and run the `Trois` scheme for normal development.
 2. To build the full app with injection support, run `./build.sh --no-deploy`. It builds `TroisLoader` and `TroisInjector` first and bundles them into the app. Without `--no-deploy` it also replaces `/Applications/Trois.app`. It signs ad hoc unless `TROIS_SIGN_IDENTITY` names a signing identity in your keychain; macOS asks for Accessibility permission again after each ad hoc build.
 
+Run the tests with Product > Test in Xcode, or:
+
+```sh
+xcodebuild -project Trois.xcodeproj -scheme Trois -configuration Debug test
+```
+
+They cover frame parsing and the theme installer's safety checks, and run on every push and pull request. Their frames are generated, not copied from real themes.
+
 Overlay mode only needs the Accessibility permission. You don't need to disable SIP unless you're working on Injection mode.
 
 ## Pull requests
