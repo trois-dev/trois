@@ -449,7 +449,7 @@ final class ButtonWindow: TrafficLightOverlay {
 
     func press(retry: Bool) {
         guard let button = targetButton else { return }
-        AXQueue.async { [weak self] in
+        AXQueue.async(element: button) { [weak self] in
             let error = AXUIElementPerformAction(button, kAXPressAction as CFString)
             guard retry, error == .invalidUIElement else { return }
             DispatchQueue.main.async {

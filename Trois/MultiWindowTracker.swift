@@ -10,7 +10,8 @@ struct ButtonFrames: Equatable {
 
 // Motion comes from window-server move/resize events, so overlays follow at
 // window-server latency without AX reads. AX is only read when a window is
-// first seen or its size changes, on AXQueue so a slow app can't stall motion.
+// first seen or its size changes, on its app's AXQueue so a slow app can't
+// stall motion or other apps.
 // Window-server show/hide/reorder events and AX focus and new-window
 // notifications prompt a scan, which picks up new, closed and refocused
 // windows. A slow periodic scan backs them up, for apps that don't post.
@@ -201,6 +202,7 @@ class MultiWindowTracker {
         }
         if notification.name == NSWorkspace.didTerminateApplicationNotification, let app {
             buttonWatcher.forget(app.processIdentifier)
+            AXQueue.forget(app.processIdentifier)
             bundlePaths[app.processIdentifier] = nil
         }
         scan()
@@ -647,7 +649,7 @@ class MultiWindowTracker {
     // Finds and reads the AX windows for newly seen windows of one app.
     private func lookUp(_ windows: [(wid: CGWindowID, frame: CGRect)], of pid: pid_t) {
         let generation = self.generation
-        AXQueue.async { [weak self] in
+        AXQueue.async(pid: pid) { [weak self] in
             let axWindows = Self.axWindows(of: pid)
             let reads = windows.map { window -> (wid: CGWindowID, read: WindowRead) in
                 guard let axWindow = Self.matchAXWindow(wid: window.wid, frame: window.frame, in: axWindows) else {
@@ -806,23 +808,30 @@ class MultiWindowTracker {
     private func queryFocus() {
         guard !focusQueryInFlight else { return }
         focusQueryInFlight = true
-        var pid: pid_t?
-        if let frontApp = NSWorkspace.shared.frontmostApplication,
-           frontApp.bundleIdentifier != Bundle.main.bundleIdentifier {
-            pid = frontApp.processIdentifier
-        }
         let generation = self.generation
-        AXQueue.async { [weak self] in
-            let wid = pid.map(Self.focusedWindowID(of:)) ?? .some(nil)
-            DispatchQueue.main.async {
-                guard let self, generation == self.generation else { return }
-                self.focusQueryInFlight = false
-                // Nil when the app didn't answer; keep the last known focus.
-                if let wid, wid != self.focusedWID {
-                    self.focusedWID = wid
-                    self.scan()
-                }
+        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+              frontApp.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            DispatchQueue.main.async { [weak self] in
+                self?.didQueryFocus(.some(nil), generation: generation)
             }
+            return
+        }
+        let pid = frontApp.processIdentifier
+        AXQueue.async(pid: pid) { [weak self] in
+            let wid = Self.focusedWindowID(of: pid)
+            DispatchQueue.main.async {
+                self?.didQueryFocus(wid, generation: generation)
+            }
+        }
+    }
+
+    private func didQueryFocus(_ wid: CGWindowID??, generation: Int) {
+        guard generation == self.generation else { return }
+        focusQueryInFlight = false
+        // Nil when the app didn't answer; keep the last known focus.
+        if let wid, wid != focusedWID {
+            focusedWID = wid
+            scan()
         }
     }
 
@@ -945,7 +954,7 @@ final class ButtonWatcher {
         watched[wid] = (pid, elements)
         let refcon = UnsafeMutableRawPointer(bitPattern: UInt(wid))
         // Adding a notification messages the app, so it can block.
-        AXQueue.async {
+        AXQueue.async(pid: pid) {
             for (element, notification) in elements {
                 AXObserverAddNotification(observer, element, notification, refcon)
             }
@@ -955,7 +964,7 @@ final class ButtonWatcher {
     func unwatch(_ wid: CGWindowID) {
         guard let entry = watched.removeValue(forKey: wid) else { return }
         guard let observer = observers[entry.pid] else { return }
-        AXQueue.async {
+        AXQueue.async(pid: entry.pid) {
             for (element, notification) in entry.elements {
                 AXObserverRemoveNotification(observer, element, notification)
             }
@@ -979,7 +988,7 @@ final class ButtonWatcher {
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         observers[pid] = observer
         let app = AXUIElementCreateApplication(pid)
-        AXQueue.async {
+        AXQueue.async(pid: pid) {
             for notification in Self.appNotifications {
                 AXObserverAddNotification(observer, app, notification as CFString, nil)
             }

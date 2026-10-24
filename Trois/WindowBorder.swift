@@ -615,7 +615,7 @@ final class BorderWindow {
         case .collapse: element = target?.minimize
         }
         guard let element else { return }
-        AXQueue.async {
+        AXQueue.async(element: element) {
             AXUIElementPerformAction(element, kAXPressAction as CFString)
         }
     }
@@ -623,7 +623,7 @@ final class BorderWindow {
     private func raiseTarget() {
         guard let window = target?.window else { return }
         NSRunningApplication(processIdentifier: pid)?.activate()
-        AXQueue.async {
+        AXQueue.async(pid: pid) {
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         }
     }
@@ -637,7 +637,7 @@ final class BorderWindow {
             return
         }
         isSettingPosition = true
-        AXQueue.async { [weak self] in
+        AXQueue.async(pid: pid) { [weak self] in
             var point = position
             if let value = AXValueCreate(.cgPoint, &point) {
                 AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)

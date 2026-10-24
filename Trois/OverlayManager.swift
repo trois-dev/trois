@@ -2,20 +2,46 @@
 import Cocoa
 import ApplicationServices
 
-// AX calls block until the target app answers, so they run on this serial
-// queue and their results are applied on main. Overlay motion and clipping
-// never wait on them.
+// AX calls block until the target app answers, so they run on a serial queue
+// per app and their results are applied on main. Overlay motion and clipping
+// never wait on them, and a hung app only holds up its own windows.
 enum AXQueue {
-    static let queue: DispatchQueue = {
-        // The system-wide element sets the timeout for every AX call this
-        // process makes, including ones on window and button elements. A hung
-        // app then holds the queue for this long instead of the 6s default.
+    private static let lock = NSLock()
+    private static var queues: [pid_t: DispatchQueue] = [:]
+
+    // The system-wide element sets the timeout for every AX call this process
+    // makes, including ones on window and button elements. A hung app then
+    // holds its queue for this long instead of the 6s default.
+    private static let setTimeout: Void = {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
-        return DispatchQueue(label: "com.trois.app.ax", qos: .userInteractive)
     }()
 
-    static func async(_ work: @escaping () -> Void) {
-        queue.async(execute: work)
+    private static func queue(for pid: pid_t) -> DispatchQueue {
+        _ = setTimeout
+        lock.lock()
+        defer { lock.unlock() }
+        if let queue = queues[pid] { return queue }
+        let queue = DispatchQueue(label: "com.trois.app.ax.\(pid)", qos: .userInteractive)
+        queues[pid] = queue
+        return queue
+    }
+
+    static func async(pid: pid_t, _ work: @escaping () -> Void) {
+        queue(for: pid).async(execute: work)
+    }
+
+    /// Runs on the queue of the app that owns `element`.
+    static func async(element: AXUIElement, _ work: @escaping () -> Void) {
+        var pid: pid_t = 0
+        AXUIElementGetPid(element, &pid)
+        async(pid: pid, work)
+    }
+
+    /// Drops an app's queue once it quit. Work already queued still runs.
+    static func forget(_ pid: pid_t) {
+        lock.lock()
+        queues[pid] = nil
+        lock.unlock()
     }
 }
 
@@ -170,7 +196,7 @@ class OverlayManager {
             return
         }
         isRefreshing = true
-        AXQueue.async { [weak self] in
+        AXQueue.async(pid: pid) { [weak self] in
             let read = Self.read(window)
             DispatchQueue.main.async {
                 guard let self, !self.removed else { return }
@@ -272,7 +298,7 @@ class OverlayManager {
     func verify() {
         guard let window = currentWindow, !removed, !isRefreshing, !isVerifying else { return }
         isVerifying = true
-        AXQueue.async { [weak self] in
+        AXQueue.async(pid: pid) { [weak self] in
             // Outer nil when the app didn't answer in time.
             let closeFrame: CGRect??
             do {
@@ -340,7 +366,7 @@ class OverlayManager {
     /// Presses one button on every window of an app, as Option-clicking
     /// close or minimize does on system buttons.
     static func pressAll(_ attribute: String, of pid: pid_t) {
-        AXQueue.async {
+        AXQueue.async(pid: pid) {
             let app = AXUIElementCreateApplication(pid)
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
@@ -1396,7 +1422,7 @@ class OverlayWindow: NSPanel, TrafficLightOverlay {
 
     func press(retry: Bool) {
         guard let button = targetButton else { return }
-        AXQueue.async { [weak self] in
+        AXQueue.async(element: button) { [weak self] in
             let error = AXUIElementPerformAction(button, kAXPressAction as CFString)
             guard retry, error == .invalidUIElement else { return }
             DispatchQueue.main.async {
